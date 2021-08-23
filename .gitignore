@@ -1,0 +1,9 @@
+not.music
+yt.failed
+*.pkl
+__pycache__
+yt.cache
+track.hist
+.cache
+.spotdl-cache
+env.py

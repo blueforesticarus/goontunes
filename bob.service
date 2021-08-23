@@ -1,0 +1,12 @@
+[Unit]
+Description=Bob the Playlist Builder
+
+[Service]
+ExecStart=/usr/bin/python main.py
+WorkingDirectory=/home/files/projects/dev/prototype/radio/
+Restart=always
+RestartSec=5m 
+RuntimeMaxSec=8h
+
+[Install]
+WantedBy=default.target
