@@ -58,6 +58,16 @@ func main() {
 	go global.Spotify.connect()
 	go global.Discord.connect()
 
+	//who needs thread safety?
+	//entries should only grow so we should be good taking a slice
+	//for real though I don't know how to do the mutexs properly in this case
+	global.plumber.pauseall(true)
+	for _, e := range global.em.Entries[:] {
+		//I mean plumb is designed so that race conditions dont matter
+		PlumbEntry(e) // this will retry getting spotify data if it didn't before
+	}
+	global.plumber.pauseall(false) //unpause
+
 	exitSignal := make(chan os.Signal)
 	signal.Notify(exitSignal, syscall.SIGINT, syscall.SIGTERM)
 	<-exitSignal

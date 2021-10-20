@@ -93,7 +93,7 @@ func (self CachedTokenSource) Token() (*oauth2.Token, error) {
 }
 
 func (app *SpotifyApp) Authenticate(cachefile string) *spotify.Client {
-	var ctx = context.Background() //no clue about this one
+	var ctx = contextWithHTTPClient(context.Background()) //no clue about this one
 	var config = app.AuthConfig()
 
 	tokensource := func(token *oauth2.Token) oauth2.TokenSource {

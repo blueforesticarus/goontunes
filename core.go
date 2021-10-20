@@ -29,7 +29,7 @@ type Entry struct {
 
 type EntryManager struct {
 	Entries []Entry
-	Lock    sync.Mutex
+	Lock    sync.RWMutex
 	Sorted  bool
 
 	//_entry_map map[string]*Entry
@@ -43,8 +43,8 @@ func new_EntryManager() *EntryManager {
 }
 
 func (self *EntryManager) add_entry(entry Entry) bool {
-	self.Lock.Lock()
-	defer self.Lock.Unlock()
+	self.Lock.RLock()
+	defer self.Lock.RUnlock()
 
 	for i, e := range self.Entries {
 		if e.MessageId == entry.MessageId {
@@ -57,11 +57,12 @@ func (self *EntryManager) add_entry(entry Entry) bool {
 }
 
 func (self *EntryManager) save() {
-	self.Lock.Lock()
-	defer self.Lock.Unlock()
+	self.Lock.RLock()
+	defer self.Lock.RUnlock() //supposedly defer has overhead
 
 	bytes, _ := json.MarshalIndent(self.Entries, "", "")
 	_ = ioutil.WriteFile(self.cachepath, bytes, 0644)
+	fmt.Printf("saved entries\n")
 }
 
 func (self *EntryManager) load() {
@@ -73,19 +74,36 @@ func (self *EntryManager) load() {
 		fmt.Printf("failed to open %s\n", self.cachepath)
 		return
 	}
+
 	err = json.Unmarshal([]byte(bytes), &self.Entries)
 	if err != nil {
 		fmt.Printf("failed to parse %s\n", self.cachepath)
 	} else {
 		fmt.Printf("loaded %s\n", self.cachepath)
 	}
+}
 
+//Used by discord.go to know how far back to look for messages
+func (em *EntryManager) Latest(platform string, channel string) Entry {
+	em.Lock.RLock()
+	defer em.Lock.RUnlock()
+
+	latest := Entry{Valid: false, MessageId: ""}
+	for _, entry := range em.Entries {
+		if (platform == "" || platform == entry.Platform) &&
+			(channel == "" || channel == entry.ChannelId) {
+			if !latest.Valid || latest.Date.Before(entry.Date) {
+				latest = entry
+			}
+		}
+	}
+	return latest
 }
 
 type Library struct {
 	Tracks      []*Track //can contain nill if track removed
 	Collections map[string]Collection
-	Lock        sync.Mutex
+	Lock        sync.RWMutex
 
 	_track_map map[string]*Track
 	cachepath  string
@@ -100,11 +118,12 @@ func new_Library() *Library {
 }
 
 func (self *Library) save() {
-	self.Lock.Lock()
-	defer self.Lock.Unlock()
+	self.Lock.RLock()
+	defer self.Lock.RUnlock()
 
 	bytes, _ := json.MarshalIndent(self, "", "")
 	_ = ioutil.WriteFile(self.cachepath, bytes, 0644)
+	fmt.Printf("saved library\n")
 }
 
 func (self *Library) load() {
@@ -116,6 +135,7 @@ func (self *Library) load() {
 		fmt.Printf("failed to open %s\n", self.cachepath)
 		return
 	}
+
 	err = json.Unmarshal([]byte(bytes), &self)
 	if err != nil {
 		fmt.Printf("failed to parse %s\n", self.cachepath)
@@ -125,29 +145,35 @@ func (self *Library) load() {
 }
 
 func (self *Library) getTrack(id string) *Track {
-	self.Lock.Lock()
-	defer self.Lock.Unlock()
-
+	self.Lock.RLock()
 	track := self._track_map[id]
 	if track != nil {
 		if !contains_a_fucking_string(track.IDs, id) {
 			panic("uh oh")
 		}
-		return self._track_map[id]
+		self.Lock.RUnlock()
+		return track
 	}
 
 	for _, track := range self.Tracks {
 		if contains_a_fucking_string(track.IDs, id) {
+			self.Lock.RUnlock()
+			self.Lock.Lock()
 			self._track_map[id] = track
+			self.Lock.Unlock()
 			return track
 		}
 	}
+	self.Lock.RUnlock()
 	return nil
 }
 
 func (self *Library) getTracks(id string) []*Track {
 	//no lock because it would deadlock when getTrack locks
+	self.Lock.RLock()
 	c := self.Collections[id]
+	self.Lock.RUnlock()
+
 	if c.ID != "" {
 		tl := make([]*Track, len(c.TracksIDs))
 		for i, t := range c.TracksIDs {

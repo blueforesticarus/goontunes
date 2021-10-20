@@ -2,12 +2,10 @@ package main
 
 import (
 	"fmt"
-	"math"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -35,6 +33,7 @@ type DiscordApp struct {
 	dg       *discordgo.Session
 }
 
+/*
 func (self *DiscordApp) clone() *DiscordApp {
 	var c DiscordApp
 	c.Token = self.Token
@@ -56,6 +55,7 @@ func (self *DiscordApp) clone() *DiscordApp {
 
 	return &c
 }
+*/
 
 func (self *DiscordApp) connect() {
 	// Create a new Discord session using the provided bot token.
@@ -136,7 +136,10 @@ func (self *DiscordApp) on_message(s *discordgo.Session, m *discordgo.MessageCre
 func (self *DiscordApp) on_ready(s *discordgo.Session, event *discordgo.Ready) {
 	fmt.Println("DISCORD: connected")
 	self.check_channels()
+	//global.plumber.pauseall(true) //just do it all at the end
 	self.fetch_messages_all(true)
+	global.plumber.rescan()
+	//global.plumber.pauseall(false)
 }
 
 func (self *DiscordApp) fetch_messages_all(use_cache bool) {
@@ -150,20 +153,19 @@ func (self *DiscordApp) fetch_messages_all(use_cache bool) {
 			} else {
 				start = ""
 			}
-			self.the_algorythm(cid, start)
-			//self.fetch_messages(start, "", cid)
+			//self.the_algorythm(cid, start)
+			self.fetch_messages(start, "", cid)
 		}
 	}
 
 	duration := time.Since(st)
-	fmt.Printf("DISCORD: fetched messages in %v seconds\n", duration.Seconds())
 
-	global.em.save() //XXX moveme
+	fmt.Printf("DISCORD: fetched messages in %v seconds\n", duration.Seconds())
 }
 
 var MaxMessage = 100
 
-/* NOT FASTER, SAD! */
+/* NOT FASTER, SAD!
 func (self *DiscordApp) the_algorythm(cid string, since string) {
 	fmt.Printf("DISCORD: fetching messages from %s\n", cid)
 	var st time.Time
@@ -255,6 +257,7 @@ func (self *DiscordApp) half_algo(a string, b string, deltahint time.Duration, c
 		}(i)
 	}
 }
+*/
 
 func (self *DiscordApp) fetch_messages(start string, end string, ch string) {
 	a := Timestamp(start).Format("2006-01-02")
@@ -266,6 +269,7 @@ func (self *DiscordApp) fetch_messages(start string, end string, ch string) {
 	}
 	fmt.Printf("DISCORD: %s fetch chunk %s - %s\n", ch, a, b)
 
+	global.plumber.pauseall(true) //better grouping
 	st := Timestamp(start)
 	for _, message := range ms {
 		if start != "" {
@@ -276,6 +280,7 @@ func (self *DiscordApp) fetch_messages(start string, end string, ch string) {
 		}
 		process_message(message)
 	}
+	global.plumber.pauseall(false)
 
 	if len(ms) >= MaxMessage {
 		a, _ := ms[0].Timestamp.Parse()
@@ -325,7 +330,7 @@ func process_message(message *discordgo.Message) {
 		}
 
 		if entry.Valid {
-			go PlumbEntry(entry) //because this WILL do spotify calls
+			PlumbEntry(entry)
 		}
 	}
 }
