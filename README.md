@@ -1,5 +1,5 @@
 # GoonTunes
-### spotify playlists for the goonsquad
+### spotify playlists for the you and your goons
 
 Epic Features:
 - Create Spotify Playlists from Discord Posts
