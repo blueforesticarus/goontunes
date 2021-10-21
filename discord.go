@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"net/url"
 	"regexp"
 	"strconv"
@@ -59,6 +60,10 @@ func (self *DiscordApp) clone() *DiscordApp {
 
 func (self *DiscordApp) connect() {
 	// Create a new Discord session using the provided bot token.
+	if self.Token == "" || self.Token == "<yours>" {
+		log.Fatalf("DISCORD: Generate a token following the instructions here: %s\n", helpurl)
+	}
+
 	dg, err := discordgo.New("Bot " + self.Token)
 	if err != nil {
 		fmt.Println("DISCORD: error creating session with token ", self.Token, err)
@@ -95,8 +100,10 @@ func (self *DiscordApp) check_channels() {
 	}
 }
 
-func (self *DiscordApp) scan_channels() {
+func (self *DiscordApp) scan_channels() []string {
 	// Loop through each guild in the session
+	ids := make([]string, 0, 1)
+
 	gs, err := self.dg.UserGuilds(100, "", "")
 	if err != nil {
 		fmt.Printf("Discord: cannot load guilds %v\n", err)
@@ -110,9 +117,11 @@ func (self *DiscordApp) scan_channels() {
 			// Check if channel is a guild text channel and not a voice or DM channel
 			if c.Type == discordgo.ChannelTypeGuildText {
 				fmt.Printf("DISCORD: found %s -> %s\n", c.ID, c.Name)
+				ids = append(ids, c.ID)
 			}
 		}
 	}
+	return ids
 }
 
 // This function will be called (due to AddHandler above) every time a new
@@ -129,17 +138,27 @@ func (self *DiscordApp) on_message(s *discordgo.Session, m *discordgo.MessageCre
 	}
 
 	process_message(m.Message)
+	global.plumber.j_playlist_task.Trigger()
 }
 
 // This function will be called (due to AddHandler above) when the bot receives
 // the "ready" event from Discord.
 func (self *DiscordApp) on_ready(s *discordgo.Session, event *discordgo.Ready) {
+	global.plumber.j_playlist_task.Pause(true)
 	fmt.Println("DISCORD: connected")
+
+	if len(self.Channels) == 0 {
+		self.Channels = self.scan_channels()
+		if len(self.Channels) == 0 {
+			log.Fatalf("DISCORD: Your discord bot is not in any channels. You need to invite the bot to your music channel.\n")
+		}
+	}
+
 	self.check_channels()
-	//global.plumber.pauseall(true) //just do it all at the end
 	self.fetch_messages_all(true)
 	global.plumber.rescan()
-	//global.plumber.pauseall(false)
+	global.plumber.j_playlist_task.Trigger()
+	global.plumber.j_playlist_task.Pause(false)
 }
 
 func (self *DiscordApp) fetch_messages_all(use_cache bool) {

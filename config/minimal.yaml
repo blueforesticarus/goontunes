@@ -1,0 +1,24 @@
+# this is a yaml, copy to .config and set up with your values
+# this will scrape all channels yout bot has access to, and use all of them to generate playlists
+cachepath: .cache
+discord: 
+    token: <yours>
+
+playlists:
+ -  name: default
+    reverse: true
+ -  name: weekly
+    type: discover
+    norepeat: true
+
+spotify:
+    cachetoken: true
+    clientid: <yours>
+    clientsecret: <yours>
+    redirect_uri: http://localhost:<port>
+
+    playlists:
+     -  name: My Discord Radio
+        sync: default
+     -  name: My Discord Weekly
+        sync: weekly

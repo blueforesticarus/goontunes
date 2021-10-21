@@ -13,17 +13,20 @@ type Job struct {
 	hot sync.Map
 	//die bool TODO killable
 
-	pause int32 // 0 to unpause
+	pause  int32 // 0 to unpause
+	active uint32
+
+	idle sync.Cond
 }
 
 func (job *Job) Spinup(worker func([]string), batchsize int, maxparallel uint32, permithot bool) {
 	job.queue = make([]string, 0, 50)
 	job.cond = *sync.NewCond(&sync.Mutex{})
+	job.idle = *sync.NewCond(&sync.Mutex{})
 	//job.Lock is signaled every time Ids is altered
 	//we want to start the worker function any time
 	//A: no workers are running and there is at least one thing in the queue
 	//or B: the queue has batchsize items
-	var active uint32
 
 	foo := func(batch []string) {
 		if permithot {
@@ -31,8 +34,22 @@ func (job *Job) Spinup(worker func([]string), batchsize int, maxparallel uint32,
 				job.hot.Delete(s)
 			}
 		}
-		worker(batch)                         //must be blocking
-		atomic.AddUint32(&active, ^uint32(0)) //decrement
+		worker(batch) //must be blocking
+
+		//the idle cond really messing stuff up
+		if atomic.LoadUint32(&job.active) == 1 {
+			empty := job.None()
+
+			job.idle.L.Lock()
+			a := atomic.AddUint32(&job.active, ^uint32(0)) //decrement
+			if a == 0 && empty {
+				job.idle.Broadcast()
+			}
+			job.idle.L.Unlock()
+		} else {
+			atomic.AddUint32(&job.active, ^uint32(0)) //decrement
+		}
+
 		if !permithot {
 			for _, s := range batch {
 				job.hot.Delete(s)
@@ -49,16 +66,16 @@ func (job *Job) Spinup(worker func([]string), batchsize int, maxparallel uint32,
 		for {
 			pause := atomic.LoadInt32(&job.pause) > 0
 			if !pause && len(job.queue) > 0 {
-				a := atomic.LoadUint32(&active)
+				a := atomic.LoadUint32(&job.active)
 				if len(job.queue) > batchsize {
 					if a < maxparallel {
-						atomic.AddUint32(&active, 1)
+						atomic.AddUint32(&job.active, 1)
 						go foo(job.queue[:batchsize])
 						job.queue = job.queue[batchsize:]
 						continue
 					}
 				} else if a == 0 {
-					atomic.AddUint32(&active, 1)
+					atomic.AddUint32(&job.active, 1)
 					go foo(job.queue[:]) //pretty sure the next line WONT undo this
 					job.queue = make([]string, 0, 50)
 				}
@@ -110,4 +127,48 @@ func (job *CooldownJob) SpinupCooldown(foo func(), delay time.Duration) {
 		foo()
 		time.Sleep(delay)
 	}, 1, 1, true)
+}
+
+// For the playlist task
+func (job *Job) None() bool {
+	job.cond.L.Lock()
+	a := len(job.queue)
+	job.cond.L.Unlock()
+	return a == 0
+}
+
+// For the playlist task
+func (job *Job) IsIdle() bool {
+	return atomic.LoadUint32(&job.active) == 0
+}
+
+func WaitOnIdle(jobs ...*Job) {
+OUTER:
+	for {
+		for _, j := range jobs {
+			j.WaitOnIdle()
+		}
+		for _, j := range jobs {
+			if !j.IsIdle() && j.None() {
+				continue OUTER
+			}
+		}
+		break
+	}
+}
+
+func (job *Job) WaitOnIdle() {
+	job.idle.L.Lock()
+	for {
+		if job.IsIdle() {
+			job.idle.L.Unlock()
+			if job.None() && job.IsIdle() {
+				return
+			} else {
+				job.idle.L.Lock()
+				continue
+			}
+		}
+		job.idle.Wait()
+	}
 }

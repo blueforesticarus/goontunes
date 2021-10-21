@@ -24,3 +24,12 @@ func Batched(foo func(int, []string), ls []string, n int, async bool) {
 		wg.Wait()
 	}
 }
+
+func BatchedRange(foo func(int, int), count int, n int) {
+	for i := 0; i < count; i += n {
+		if n > count-i {
+			n = count - i
+		}
+		foo(i, n)
+	}
+}

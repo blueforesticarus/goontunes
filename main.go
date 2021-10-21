@@ -7,15 +7,17 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v2"
 )
 
 var configfile = ".config"
+var helpurl = "https://github.com/blueforesticarus/goontunes"
 
 type State struct {
 	Discord   DiscordApp
 	Spotify   SpotifyApp // might not make sense to be list
-	Playlists []Playlist
+	Playlists []*Playlist
 
 	CachePath string
 	em        *EntryManager
@@ -37,6 +39,7 @@ func main() {
 	err = yaml.UnmarshalStrict(bytes, &global)
 	if err != nil {
 		fmt.Printf("Could not parse config %v\n", err)
+		fmt.Printf("Follow instructions at %s\n", helpurl)
 		return
 	}
 
@@ -57,16 +60,15 @@ func main() {
 	global.plumber = new_Plumber()
 	go global.Spotify.connect()
 	go global.Discord.connect()
+	//global.Spotify.init_playlists() now in spotify.connect
 
-	//who needs thread safety?
-	//entries should only grow so we should be good taking a slice
-	//for real though I don't know how to do the mutexs properly in this case
-	global.plumber.pauseall(true)
-	for _, e := range global.em.Entries[:] {
-		//I mean plumb is designed so that race conditions dont matter
-		PlumbEntry(e) // this will retry getting spotify data if it didn't before
-	}
-	global.plumber.pauseall(false) //unpause
+	c := cron.New()
+	c.AddFunc("@every 1h", func() {
+		fmt.Printf("1hr timer\n")
+		global.plumber.rescan()
+		global.plumber.j_playlist_task.Trigger()
+	})
+	c.Start()
 
 	exitSignal := make(chan os.Signal)
 	signal.Notify(exitSignal, syscall.SIGINT, syscall.SIGTERM)

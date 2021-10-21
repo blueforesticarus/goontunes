@@ -1,0 +1,39 @@
+# this is a yaml, copy to .config and set up with your values
+cachepath: .cache
+discord:
+    token: <yours> #see readme
+    channels: # replace with your values
+     -  437954211457277709 #real
+     -  878343616712880162 #test server
+
+playlists:
+ -  name: default
+    channels:
+     -  437954211457277709
+    norepeat: false
+    reverse: true
+
+ -  name: testing
+    channels:
+     -  878343616712880162
+    norepeat: true
+    shuffle: 239847239749
+
+ -  name: weekly
+    type: discover
+    norepeat: true
+
+spotify:
+    cachetoken: true
+    clientid: <yours>
+    clientsecret: <yours>
+    redirect_uri: http://localhost:<port>
+
+    playlists:
+     # you can comment out sections
+     #-  name: GoonTunes Test Server 
+     #   sync: testing
+     -  id: 22rFrNdZ7fZuq8LhmkSjST
+        sync: default
+     -  name: GoonWeekly
+        sync: weekly

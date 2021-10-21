@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
+	"sort"
 	"sync"
 	"time"
 )
@@ -30,7 +32,6 @@ type Entry struct {
 type EntryManager struct {
 	Entries []Entry
 	Lock    sync.RWMutex
-	Sorted  bool
 
 	//_entry_map map[string]*Entry
 	cachepath string
@@ -43,8 +44,8 @@ func new_EntryManager() *EntryManager {
 }
 
 func (self *EntryManager) add_entry(entry Entry) bool {
-	self.Lock.RLock()
-	defer self.Lock.RUnlock()
+	self.Lock.Lock()
+	defer self.Lock.Unlock()
 
 	for i, e := range self.Entries {
 		if e.MessageId == entry.MessageId {
@@ -102,7 +103,7 @@ func (em *EntryManager) Latest(platform string, channel string) Entry {
 
 type Library struct {
 	Tracks      []*Track //can contain nill if track removed
-	Collections map[string]Collection
+	Collections map[string]*Collection
 	Lock        sync.RWMutex
 
 	_track_map map[string]*Track
@@ -112,8 +113,8 @@ type Library struct {
 func new_Library() *Library {
 	var lib Library
 	lib.Tracks = make([]*Track, 0)
-	lib.Collections = make(map[string]Collection, 0)
-	lib._track_map = make(map[string]*Track, 0)
+	lib.Collections = make(map[string]*Collection)
+	lib._track_map = make(map[string]*Track)
 	return &lib
 }
 
@@ -171,26 +172,52 @@ func (self *Library) getTrack(id string) *Track {
 func (self *Library) getTracks(id string) []*Track {
 	//no lock because it would deadlock when getTrack locks
 	self.Lock.RLock()
-	c := self.Collections[id]
+	c, ok := self.Collections[id]
 	self.Lock.RUnlock()
 
-	if c.ID != "" {
+	if ok {
 		tl := make([]*Track, len(c.TracksIDs))
 		for i, t := range c.TracksIDs {
 			tl[i] = self.getTrack(t)
+			if t == "" {
+				fmt.Printf("error with collection %s\n", c.ID)
+				return []*Track{}
+			}
+			if tl[i] == nil {
+				fmt.Printf("error with collection %s track %s\n", c.ID, t)
+				return []*Track{}
+			}
 		}
 		return tl
 	} else {
-		return []*Track{self.getTrack(id)}
+		t := self.getTrack(id)
+		if t != nil {
+			return []*Track{t}
+		} else {
+			return []*Track{}
+		}
 	}
 }
 
-func (self *Library) addTrack(track *Track) {
-	self.Lock.Lock()
-	defer self.Lock.Unlock()
+func (self *Library) getCollection(id string) *Collection {
+	self.Lock.RLock()
+	c := self.Collections[id]
+	self.Lock.RUnlock()
+	return c
+}
 
+func (self *Library) addCollection(c Collection) {
+	self.Lock.Lock()
+	self.Collections[c.ID] = &c
+	self.Lock.Unlock()
+}
+
+func (self *Library) addTrack(track *Track) *Track {
+	self.Lock.Lock()
 	track.Index = len(self.Tracks)
 	self.Tracks = append(self.Tracks, track)
+	self.Lock.Unlock()
+	return self.getTrack(track.IDs[0])
 }
 
 func (self *Library) mergeTrack(t1 *Track, t2 *Track) {
@@ -249,6 +276,10 @@ type Collection struct {
 	//Once again, we just hope there are no cross service ID conflicts
 	ID        string
 	TracksIDs []string
+
+	Service string //collection are single service
+	Rev     string //revision, optional
+	Name    string //for my sanity
 }
 
 type Playlist struct {
@@ -256,9 +287,109 @@ type Playlist struct {
 	Channels []string //nil for all channels
 	NoRepeat bool
 
-	Targets []string //which services
-	tracks  []*Track
+	Shuffle int
+	Reverse bool
 
-	SpotifyId string
-	YoutubeId string
+	Type string
+
+	tracks       []*Track
+	last_rebuild time.Time
+}
+
+func (self *Playlist) Rebuild() bool {
+	accept := func(entry *Entry) bool {
+		//channel matching
+		if len(self.Channels) != 0 {
+			if !contains_a_fucking_string(self.Channels, entry.ChannelId) {
+				return false
+			}
+		}
+
+		//type
+		if self.Type == "discover" {
+			if entry.Type != "playlist" {
+				return false
+			}
+		} else { //default
+			if "album" != entry.Type && "track" != entry.Type {
+				return false
+			}
+		}
+		return true
+	}
+
+	global.em.Lock.RLock()
+
+	type pair struct {
+		a []*Track
+		b time.Time
+	}
+
+	el := make([]*Entry, 0, len(global.em.Entries))
+	for i, e := range global.em.Entries {
+		if accept(&e) {
+			el = append(el, &global.em.Entries[i])
+		}
+	}
+
+	sort.Slice(el, func(i, j int) bool {
+		if self.Reverse {
+			return el[i].Date.After(el[j].Date)
+		} else {
+			return el[i].Date.Before(el[j].Date)
+		}
+	})
+
+	repeat_entry := make(map[string]bool)
+	//repeat_track := make(map[string]bool) TODO trackwise no repeat
+
+	tl := make([]*Track, 0, len(self.tracks))
+	for _, e := range el {
+		if self.NoRepeat {
+			if repeat_entry[e.ID] {
+				continue
+			} else {
+				repeat_entry[e.ID] = true
+			}
+		}
+		tl = append(tl, global.lib.getTracks(e.ID)...)
+	}
+
+	if self.Shuffle != 0 {
+		//use as seed
+		rand.Seed(int64(self.Shuffle * len(tl)))
+		rand.Shuffle(len(tl), func(i, j int) {
+			tl[i], tl[j] = tl[j], tl[i]
+		})
+	}
+
+	//did anything change?
+	var ret bool
+	if len(self.tracks) != len(tl) {
+		ret = true
+	} else {
+		for i, t := range self.tracks {
+			if t != tl[i] {
+				ret = true
+			}
+		}
+	}
+
+	//check
+	te := 0
+	for _, v := range tl {
+		if v == nil {
+			te++
+		} else if v.IDMaps == nil {
+			te++ // should never happen
+		}
+	}
+	if te != 0 {
+		fmt.Printf("%d errors in playlist creation\n", te)
+	}
+
+	self.tracks = tl
+	global.em.Lock.RUnlock()
+	self.last_rebuild = time.Now()
+	return ret
 }
