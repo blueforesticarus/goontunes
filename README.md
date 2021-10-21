@@ -5,7 +5,7 @@ Epic Features:
 - Create Spotify Playlists from Discord Posts
 - Merge you and your friends discover weekly into a single playlist
     - just post your DW playlist into the Discord channel the bot watches
-- fully automatic, as long as it doesnt crash
+- fully automatic, as long as it doesnt crash: WE LOVE GOROUTINES
 
 ## Setup
 1. Create a discord bot token
