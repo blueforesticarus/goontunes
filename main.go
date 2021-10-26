@@ -24,12 +24,26 @@ type State struct {
 	lib       *Library
 
 	plumber *Plumber
+
+	Manual map[string][]string
+}
+
+func process_manual() {
+	for k, v := range global.Manual {
+		for i, s := range v {
+			process_entry(Entry{
+				MessageId: fmt.Sprintf("manual+%s+%d", k, i),
+				Platform:  "manual",
+				ChannelId: k,
+				Url:       s,
+			}, &global.plumber.d_entry)
+		}
+	}
 }
 
 var global State
 
 func main() {
-
 	bytes, err := ioutil.ReadFile(configfile)
 	if err != nil {
 		fmt.Printf("Error, cannot open config file %v\n", configfile)
@@ -49,6 +63,14 @@ func main() {
 		return
 	}
 
+	/* Doesnt work
+	runlock := global.CachePath + "/runlock"
+	_, err = net.Listen("unix", runlock)
+	if err != nil {
+		log.Fatalf("Program already running. (If it isn't, delete %s)\n", runlock)
+	}
+	*/
+
 	global.em = new_EntryManager()
 	global.em.cachepath = global.CachePath + "/entries"
 	global.em.load()
@@ -58,15 +80,16 @@ func main() {
 	global.lib.load()
 
 	global.plumber = new_Plumber()
+	global.Discord.output = &global.plumber.d_entry
+
 	go global.Spotify.connect()
 	go global.Discord.connect()
-	//global.Spotify.init_playlists() now in spotify.connect
+	go process_manual()
 
 	c := cron.New()
 	c.AddFunc("@every 1h", func() {
 		fmt.Printf("1hr timer\n")
 		global.plumber.rescan()
-		global.plumber.j_playlist_task.Trigger()
 	})
 	c.Start()
 

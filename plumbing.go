@@ -7,224 +7,280 @@ import (
 	"github.com/blueforesticarus/goontunes/util"
 )
 
-func (self *Plumber) rescan() {
-	self.j_spot_track.Pause(true)
-	global.Spotify.ready.Wait()
+type Plumber struct {
+	d_entry util.Delegate
 
-	//who needs thread safety?
-	//entries should only grow so we should be good taking a slice
-	//for real though I don't know how to do the mutexs properly in this case
-	self.pauseall(true)
-	for _, e := range global.em.Entries[:] {
-		//I mean plumb is designed so that race conditions dont matter
-		PlumbEntry(e) // this will retry getting spotify data if it didn't before
-	}
-	self.pauseall(false) //unpause
-	self.j_spot_track.Pause(false)
-	self.j_playlist_task.Trigger()
+	//efficiently fetch data
+	d_collection util.Delegate
+	j_spot_track util.WaitJob
+	j_spot_extra util.WaitJob
+
+	d_track         util.Delegate
+	j_spot_album    util.WaitJob
+	j_spot_playlist util.WaitJob
+
+	j_playlist_task util.TriggerJob
+	j_save_em       util.CooldownJob //implement
+	j_save_lib      util.CooldownJob
 }
 
-type Plumber struct {
-	//efficiently fetch data
-	j_spot_track    util.Job
-	j_spot_extra    util.Job
-	j_spot_album    util.Job
-	j_spot_playlist util.Job
+func (self *Plumber) rescan() {
+	self.d_entry.Set(1)
+	defer self.d_entry.Set(-1)
 
-	j_playlist_task util.Job
+	global.em.Lock.RLock()
+	el := make([]Entry, len(global.em.Entries))
+	for _, v := range global.em.Entries {
+		el = append(el, v)
+	}
+	global.em.Lock.RUnlock()
 
-	save_em  util.CooldownJob
-	save_lib util.CooldownJob
+	for _, v := range el {
+		self.d_entry.Plumb(v)
+	}
 }
 
 func new_Plumber() *Plumber {
 	var p Plumber
-	p.j_spot_album.Spinup(batchSpotAlbums, 20, 1, false)
-	p.j_spot_track.Spinup(batchSpotTracks, 50, 1, false)
-	p.j_spot_extra.Spinup(batchSpotExtra, 100, 1, false)
+	util.Pin.Add(1)
 
-	p.j_spot_playlist.Spinup(func(s []string) {
-		handleDiscoverWeekly(s[0])
-	}, 1, 1, false)
+	//register plumb functions
+	//plumb functions should be the only ones to edit lib
+	p.d_collection.Foo = PlumbCollection
+	p.d_track.Foo = PlumbTrack
+	p.d_entry.Foo = PlumbEntry
 
-	p.j_playlist_task.Spinup(func(_ []string) {
-		//I want this to wait for other tasks to be empty
-		//TODO okay so what I need is a entry task that waits on the other tasks
-		util.WaitOnIdle(&p.j_spot_album, &p.j_spot_track)
-		if p.j_playlist_task.None() { //short circuit
-			DoPlaylistTask()
-		}
-	}, 1, 1, true)
+	//create delegate deps
+	p.d_collection.AddJob(&p.j_spot_album)
+	p.d_collection.AddJob(&p.j_spot_playlist)
 
-	p.save_em.SpinupCooldown(global.em.save, time.Second*4)
-	p.save_lib.SpinupCooldown(global.lib.save, time.Second*4)
+	p.d_track.AddJob(&p.j_spot_track)
+	p.d_track.AddJob(&p.j_spot_extra)
+
+	//generall deps
+	util.Depends(&p.d_entry, &p.d_track)
+	util.Depends(&p.d_entry, &p.d_collection)
+	util.Depends(&p.d_collection, &p.d_track)
+
+	/*
+		still having deadlock issues
+		they are easier to fix, but it means the model is still probably wrong
+
+		ex) I was waiting on track_wait (which is tied to d_entry) in PlumbTrack
+		but the PlumbEntry -> PlumbTrack is syncronous, so it deadlocks
+		and it needs to be for there to not be deadtime in the wait for playlist task...
+		at least under the current delegate model
+	*/
+
+	//spinup workers
+	p.j_spot_track.FilterRepeats(IDString)
+	p.j_spot_track.Spinup(batchSpotTracks, 50)
+
+	p.j_spot_track.FilterRepeats(IDString)
+	p.j_spot_extra.Spinup(batchSpotExtra, 100)
+
+	p.j_spot_album.FilterRepeats(IDString)
+	p.j_spot_album.Spinup(batchSpotAlbums, 20)
+
+	p.j_spot_playlist.FilterRepeats(IDCollections)
+	p.j_spot_playlist.Spinup(singleSpotPlaylist, 1)
+
+	//playlist task
+	util.Depends(&p.d_track, &p.j_playlist_task)
+	p.j_playlist_task.Spinup(DoPlaylistTask)
+
+	//save tasks
+	p.j_save_em.Spinup(global.em.save, 10)
+	p.j_save_lib.Spinup(global.lib.save, 10)
+
+	util.Pin.Done()
 	return &p
 }
 
-func (self *Plumber) pauseall(p bool) {
-	self.j_spot_album.Pause(p)
-	self.j_spot_extra.Pause(p)
-	self.j_spot_track.Pause(p)
-}
-
 //called in discord.go when it processes an Entry, basically do everything.
-func PlumbEntry(entry Entry) {
-	if entry.ID == "" {
+func PlumbEntry(_entry interface{}) {
+	var entry = _entry.(Entry)
+	if !entry.CheckValid() {
 		return
 	}
+
 	if global.em.add_entry(entry) {
-		fmt.Println("Plumb: ", entry.Url)
-		global.plumber.save_em.Trigger()
+		//fmt.Printf("Plumb URL: %s\n", entry.Url)
 	}
 
 	if entry.IsTrack {
-		PlumbTrack(entry.ID, entry.Service)
-		return
-	}
-
-	if entry.Type == "playlist" {
-		global.plumber.j_spot_playlist.Add(entry.ID)
-		return
-	}
-
-	if entry.Service == "spotify" && entry.Type == "album" {
-		c := global.lib.getCollection(entry.ID)
-
-		if c == nil || len(global.lib.getTracks(c.ID)) == 0 {
-			global.plumber.j_spot_album.Add(entry.ID)
-		} else {
-			PlumbCollection(c)
-		}
-	}
-}
-
-func PlumbCollection(c *Collection) {
-	global.plumber.j_spot_extra.Pause(true)
-	global.plumber.j_spot_track.Pause(true)
-	for _, id := range c.TracksIDs {
-		PlumbTrack(id, c.Service)
-	}
-	global.plumber.j_spot_extra.Pause(false)
-	global.plumber.j_spot_track.Pause(false)
-	global.plumber.save_lib.Trigger()
-}
-
-func batchSpotAlbums(ids []string) {
-	global.Spotify.ready.Wait()
-	cl := global.Spotify.fetch_album_tracks(ids)
-OUTER:
-	for i, c := range cl {
-		if c.TracksIDs == nil || len(c.TracksIDs) == 0 /*0 len is more of a bug*/ {
-			fmt.Printf("Plumb: missed tracks on album %s\n", ids[i])
-		} else {
-			for _, tid := range c.TracksIDs {
-				if tid == "" {
-					fmt.Printf("Plumb: missed a track on album %s\n", ids[i])
-					continue OUTER
-				}
-			}
-			global.lib.addCollection(c)
-			PlumbCollection(&c)
-		}
-	}
-	global.plumber.save_lib.Trigger()
-}
-
-func PlumbTrack(id string, service string) {
-	if id == "" {
-		return
-	}
-
-	track := global.lib.getTrack(id)
-	if track == nil || len(track.IDs) == 0 {
-		track = &Track{
-			IDs:    []string{id},
-			IDMaps: map[string]int{service: 0},
-		}
-		global.lib.addTrack(track)
-	}
-
-	if service == "spotify" {
-		if track.SpotifyInfo == nil {
-			global.plumber.j_spot_track.Add(id)
-		}
-		if track.SpotifyExtraInfo == nil {
-			global.plumber.j_spot_extra.Add(id)
-		}
-	}
-}
-
-func batchSpotTracks(ids []string) {
-	global.Spotify.ready.Wait()
-	tl := global.Spotify.fetch_tracks_info(ids)
-	for i, v := range tl {
-		if v == nil {
-			fmt.Printf("Plumb: missed info on track %s\n", ids[i])
-		} else {
-			track := global.lib.getTrack(v.ID.String())
-			global.lib.Lock.Lock()
-			track.SpotifyInfo = v
-			global.lib.Lock.Unlock()
-		}
-	}
-	global.plumber.save_lib.Trigger()
-}
-
-func batchSpotExtra(ids []string) {
-	global.Spotify.ready.Wait()
-	tl := global.Spotify.fetch_tracks_extrainfo(ids)
-	for i, v := range tl {
-		if v == nil {
-			fmt.Printf("Plumb: missed extrainfo on track %s\n", ids[i])
-		} else {
-			track := global.lib.getTrack(v.ID.String())
-			global.lib.Lock.Lock()
-			track.SpotifyExtraInfo = v
-			global.lib.Lock.Unlock()
-		}
-	}
-
-	global.plumber.save_lib.Trigger()
-}
-
-func handleDiscoverWeekly(id string) {
-	global.Spotify.ready.Wait()
-
-	c := global.lib.getCollection(id)
-	if c != nil && c.Service == "ignored" {
-		c.TracksIDs = []string{}
-		return
-	}
-
-	global.Spotify.ready.Wait()
-	pl := global.Spotify.fetch_playlist(id)
-	if c != nil && pl != nil && pl.SnapshotID == c.Rev {
-		fmt.Printf("SPOTIFY: playlist %s has %d tracks\n", pl.ID, len(c.TracksIDs))
-		PlumbCollection(c)
-		return
-	}
-
-	if pl != nil {
-		if pl.Owner.ID == "spotify" && pl.Name == "Discover Weekly" {
-			c2 := global.Spotify.fetch_playlist_tracks(pl)
-			if c2 != nil {
-				global.lib.addCollection(*c2)
-				PlumbCollection(c2)
-			}
-		} else {
-			c2 := Collection{ID: id, TracksIDs: []string{}, Name: pl.Name, Service: "ignored"}
-			global.lib.addCollection(c2)
-			fmt.Printf("ignoring non discover weekly playlist %s\n", pl.Name)
-		}
-		global.plumber.save_lib.Trigger()
+		global.plumber.d_track.Plumb(make_track(entry.ID, entry.Service))
 	} else {
-		println("error")
+		global.plumber.d_collection.Plumb(Collection{
+			ID:      entry.ID,
+			Service: entry.Service,
+			Type:    entry.Type,
+		})
+	}
+
+	global.plumber.j_playlist_task.Trigger()
+	global.plumber.j_save_em.Trigger()
+}
+
+func PlumbCollection(_collection interface{}) {
+	var collection = _collection.(Collection)
+	collection.Valid(true)
+	c, _ := global.lib.addCollection(collection)
+	defer global.plumber.j_playlist_task.Trigger()
+	defer global.plumber.j_save_lib.Trigger()
+
+	if c.Ignored {
+		return
+	}
+
+	if c.TracksIDs != nil {
+		for _, t := range make_tracks(c.TracksIDs, c.Service) {
+			global.plumber.d_track.Plumb(t)
+		}
+	}
+
+	/*
+		if global.lib._id_skip[c.ID] {
+			return
+		}
+	*/
+
+	if len(c.TracksIDs) != 0 {
+		//reload playlist after 10 minutes, never reload album
+		if c.Date.After(time.Now().Add(-time.Minute*10)) || c.Type == "Album" {
+			return
+		}
+	}
+
+	switch collection.Service {
+	case "spotify":
+		switch collection.Type {
+		case "album":
+			global.plumber.j_spot_album.Plumb(collection.ID)
+		case "playlist":
+			global.plumber.j_spot_playlist.Plumb(collection)
+		}
+	}
+}
+
+func batchSpotAlbums(_ids ...interface{}) {
+	ids := ToStrings(_ids...)
+	cl := global.Spotify.fetch_album_tracks(ids)
+
+	for i, c := range cl {
+		if len(c.TracksIDs) == 0 {
+			fmt.Printf("Plumb: missed tracks on album %s\n", ids[i])
+
+			//TODO: perhaps this belongs in the collection struct
+			global.lib._id_skip[c.ID] = true
+			continue
+		}
+		global.plumber.d_collection.Plumb(c)
+	}
+}
+
+func singleSpotPlaylist(_collection ...interface{}) {
+	c := ToCollections(_collection...)[0]
+
+	pl := global.Spotify.fetch_playlist(c.ID)
+	if pl != nil && pl.SnapshotID == c.Rev {
+		fmt.Printf("SPOTIFY: playlist %s has %d tracks (unchanged)\n", pl.ID, len(c.TracksIDs))
+		c.Date = time.Now()
+		global.plumber.d_collection.Plumb(c)
+		return
+	}
+
+	if pl == nil {
+		fmt.Printf("SPOTIFY: error getting playlist")
+		return
+	}
+
+	if pl.Owner.ID != "spotify" {
+		c.Ignored = true
+		c.Name = pl.Name
+		c.Date = time.Now()
+		fmt.Printf("ignoring non spotify playlist %s\n", pl.Name)
+		global.plumber.d_collection.Plumb(c)
+		return
+	}
+
+	c2 := global.Spotify.fetch_playlist_tracks(pl)
+
+	if c2 != nil {
+		c2.Date = time.Now()
+		global.plumber.d_collection.Plumb(*c2)
+	} else {
+		fmt.Printf("SPOTIFY: error getting playlist tracks")
+	}
+}
+
+//TODO all below
+func PlumbTrack(_track interface{}) {
+	var track = _track.(Track)
+	track.Valid(true)
+
+	t, _ := global.lib.addTrack(track)
+	defer global.plumber.j_playlist_task.Trigger()
+	defer global.plumber.j_save_lib.Trigger()
+
+	spot_id, ok := t.GetId("spotify")
+	if ok {
+		if !t.SpotifyInfo.Initialized {
+			global.plumber.j_spot_track.Plumb(spot_id)
+		}
+		if !t.SpotifyExtraInfo.Initialized {
+			global.plumber.j_spot_extra.Plumb(spot_id)
+		}
+	}
+}
+
+func batchSpotTracks(_ids ...interface{}) {
+	ids := ToStrings(_ids...)
+
+	tl := global.Spotify.fetch_tracks_info(ids)
+	if len(tl) == 0 {
+		return
+	}
+
+	for _, v := range tl {
+		track := make_track(v.ID.String(), "spotify")
+		track.SpotifyInfo = Cached_SpotifyInfo{
+			Date:        time.Now(),
+			V:           v,
+			Failed:      0,
+			Initialized: true,
+		}
+
+		//Note: this reason this doesn't go round and round forever is because Plumb
+		//on a delegate is called syncronously, PlumbTrack is therefore run before this
+		//function exits, which means any loops will be stopped by the hot filter
+		global.plumber.d_track.Plumb(track)
+	}
+}
+
+func batchSpotExtra(_ids ...interface{}) {
+	ids := ToStrings(_ids...)
+
+	tl := global.Spotify.fetch_tracks_extrainfo(ids)
+	if len(tl) == 0 {
+		return
+	}
+
+	for _, v := range tl {
+		track := make_track(v.ID.String(), "spotify")
+		track.SpotifyExtraInfo = Cached_SpotifyExtraInfo{
+			Date:        time.Now(),
+			V:           v,
+			Failed:      0,
+			Initialized: true,
+		}
+
+		//See note in batchSpotTracks
+		global.plumber.d_track.Plumb(track)
 	}
 }
 
 func DoPlaylistTask() {
-	global.Spotify.ready.Wait()
-
 	for _, p := range global.Playlists {
 		last := p.last_rebuild
 		if !p.Rebuild() && p.last_rebuild.Sub(last) < time.Minute*30 {

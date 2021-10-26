@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blueforesticarus/goontunes/util"
 	"github.com/bwmarrin/discordgo"
 	"mvdan.cc/xurls/v2"
 )
@@ -32,6 +33,7 @@ type DiscordApp struct {
 	Token    string
 	Channels []string
 	dg       *discordgo.Session
+	output   util.Input
 }
 
 /*
@@ -57,6 +59,7 @@ func (self *DiscordApp) clone() *DiscordApp {
 	return &c
 }
 */
+var rxRelaxed = xurls.Relaxed() //precompile
 
 func (self *DiscordApp) connect() {
 	// Create a new Discord session using the provided bot token.
@@ -137,14 +140,14 @@ func (self *DiscordApp) on_message(s *discordgo.Session, m *discordgo.MessageCre
 		return
 	}
 
-	process_message(m.Message)
-	global.plumber.j_playlist_task.Trigger()
+	self.output.Set(1)
+	defer self.output.Set(-1)
+	self.process_message(m.Message)
 }
 
 // This function will be called (due to AddHandler above) when the bot receives
 // the "ready" event from Discord.
 func (self *DiscordApp) on_ready(s *discordgo.Session, event *discordgo.Ready) {
-	global.plumber.j_playlist_task.Pause(true)
 	fmt.Println("DISCORD: connected")
 
 	if len(self.Channels) == 0 {
@@ -155,13 +158,17 @@ func (self *DiscordApp) on_ready(s *discordgo.Session, event *discordgo.Ready) {
 	}
 
 	self.check_channels()
+
+	self.output.Set(1)
+	defer self.output.Set(-1)
 	self.fetch_messages_all(true)
 	global.plumber.rescan()
-	global.plumber.j_playlist_task.Trigger()
-	global.plumber.j_playlist_task.Pause(false)
 }
 
 func (self *DiscordApp) fetch_messages_all(use_cache bool) {
+	self.output.Set(1)
+	defer self.output.Set(-1)
+
 	st := time.Now()
 
 	var start string
@@ -173,7 +180,7 @@ func (self *DiscordApp) fetch_messages_all(use_cache bool) {
 				start = ""
 			}
 			//self.the_algorythm(cid, start)
-			self.fetch_messages(start, "", cid)
+			self.fetch_messages(start, cid)
 		}
 	}
 
@@ -184,141 +191,38 @@ func (self *DiscordApp) fetch_messages_all(use_cache bool) {
 
 var MaxMessage = 100
 
-/* NOT FASTER, SAD!
-func (self *DiscordApp) the_algorythm(cid string, since string) {
-	fmt.Printf("DISCORD: fetching messages from %s\n", cid)
-	var st time.Time
-	if since != "" {
-		st = *Timestamp(since)
-	} else {
-		st = *Timestamp(cid)
-	}
-	life := time.Now().Sub(st)
-
-	//shortcut for if there is only very short amount of time
-	if life.Hours() < 72 {
-		self.fetch_messages(since, "", cid)
+func (self *DiscordApp) fetch_messages(start string, ch string) {
+	if start == "" {
+		start = ch
 	}
 
-	middle := Snowflake(st.Add(life / 2))
-	ms, err := self.dg.ChannelMessages(cid, MaxMessage, "", "", middle)
+	st := Timestamp(start).Format("2006-01-02")
+	ms, err := self.dg.ChannelMessages(ch, MaxMessage, "", start, "")
 	if err != nil {
 		fmt.Println("DISCORD: error loading history", err)
 		return
 	}
 
 	for _, message := range ms {
-		process_message(message)
+		self.process_message(message)
 	}
 
-	//Note: when max was 100, I was getting 101 messages back
-	if len(ms) >= MaxMessage {
-		// N________F==M==L_________S
-		first := ms[0].ID //more recent
-		ft, _ := discordgo.SnowflakeTimestamp(first)
-		last := ms[MaxMessage-1].ID //older
-		lt, _ := discordgo.SnowflakeTimestamp(last)
-		if !ft.After(lt) {
-			panic("bad message order")
-		}
-
-		delta := ft.Sub(lt)
-
-		var wg sync.WaitGroup
-		self.half_algo("", first, delta, cid, &wg)
-		self.half_algo(last, since, delta, cid, &wg)
-
-		wg.Wait()
-	}
-}
-
-func (self *DiscordApp) half_algo(a string, b string, deltahint time.Duration, cid string, wg *sync.WaitGroup) {
-	var at, bt time.Time
-	if a == "" {
-		at = time.Now()
-	} else {
-		at = *Timestamp(a) //recent
-	}
-	if b == "" {
-		bt = *Timestamp(cid) //older
-	} else {
-		bt = *Timestamp(b) //older
-	}
-
-	if !at.After(bt) {
-		return
-	}
-
-	size := at.Sub(bt)
-	n := int(math.Min(2, math.Max(1,
-		math.Floor(size.Seconds()/(2*deltahint.Seconds())),
-	)))
-	chunk := time.Duration(float64(size.Nanoseconds()) / float64(n))
-
-	//fmt.Println(size, n, chunk)
-
-	p := make([]string, n+1)
-	p[0] = a
-	p[n] = b
-	for i := 1; i < n; i++ {
-		p[i] = Snowflake(at.Add(-chunk * time.Duration(i)))
-		//fmt.Println(i, p[i], Timestamp(p[i]))
-	}
-
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(ii int) {
-			//fmt.Printf("DEBUG: %v - %v\n", Timestamp(p[ii+1]), Timestamp(p[ii]))
-			c := self.clone()
-			c.fetch_messages(p[ii+1], p[ii], cid)
-			c.dg.Close()
-			wg.Done()
-		}(i)
-	}
-}
-*/
-
-func (self *DiscordApp) fetch_messages(start string, end string, ch string) {
-	a := Timestamp(start).Format("2006-01-02")
-	b := Timestamp(end).Format("2006-01-02")
-	ms, err := self.dg.ChannelMessages(ch, MaxMessage, end, "", "")
-	if err != nil {
-		fmt.Println("DISCORD: error loading history", err)
-		return
-	}
-	fmt.Printf("DISCORD: %s fetch chunk %s - %s\n", ch, a, b)
-
-	global.plumber.pauseall(true) //better grouping
-	st := Timestamp(start)
-	for _, message := range ms {
-		if start != "" {
-			mt, _ := message.Timestamp.Parse()
-			if mt.Before(*st) {
-				continue
-			}
-		}
-		process_message(message)
-	}
-	global.plumber.pauseall(false)
-
-	if len(ms) >= MaxMessage {
+	if len(ms) > 0 {
 		a, _ := ms[0].Timestamp.Parse()
 		b, _ := ms[len(ms)-1].Timestamp.Parse()
-		//fmt.Printf("%d | %v ... %v\n", len(ms), a, b)
-		if !a.After(b) {
-			panic("bad message order 2")
-		}
+		fmt.Printf("DISCORD: %s fetched chunk %s - %s\n", ch, st, a.Format("2006-01-02"))
 
-		if start != "" {
-			if b.Before(*st) {
-				return
+		if len(ms) >= MaxMessage {
+			if !a.After(b) {
+				panic("bad message order 2")
 			}
+
+			self.fetch_messages(ms[0].ID, ch)
 		}
-		self.fetch_messages(start, ms[len(ms)-1].ID, ch)
 	}
 }
 
-func process_message(message *discordgo.Message) {
+func (self *DiscordApp) process_message(message *discordgo.Message) {
 	if message.Type != discordgo.MessageTypeDefault {
 		return
 	}
@@ -334,23 +238,26 @@ func process_message(message *discordgo.Message) {
 		Date:       ts,
 	}
 
-	rxRelaxed := xurls.Relaxed()
 	ls := rxRelaxed.FindAllString(message.Content, -1)
 	for _, s := range ls {
+
 		entry := template
 		entry.Url = s
+		process_entry(entry, self.output)
+	}
+}
 
-		try_spotify(&entry)
-		if !entry.Valid {
-			try_youtube(&entry)
-		}
-		if !entry.Valid {
-			try_soundcloud(&entry)
-		}
+func process_entry(entry Entry, output util.Input) {
+	try_spotify(&entry)
+	if !entry.Valid {
+		try_youtube(&entry)
+	}
+	if !entry.Valid {
+		try_soundcloud(&entry)
+	}
 
-		if entry.Valid {
-			PlumbEntry(entry)
-		}
+	if entry.Valid {
+		output.Plumb(entry)
 	}
 }
 

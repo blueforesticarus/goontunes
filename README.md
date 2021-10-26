@@ -3,9 +3,11 @@
 
 Epic Features:
 - Create Spotify Playlists from Discord Posts
+- Manage a playlist to archive your Discover Weekly
 - Merge you and your friends discover weekly into a single playlist
     - just post your DW playlist into the Discord channel the bot watches
-- fully automatic, as long as it doesnt crash
+- fully automatic, ~~as long as it doesnt crash~~ now with correct™ behavior
+    - Listens for new posts and input playlist changes
 
 ## Setup
 1. Create a discord bot token
@@ -20,5 +22,15 @@ Epic Features:
 
 ## TODO
 - enforce id semantics, retry on bad id
-- rewrite all of this shitty ass code
+- youtube playlist support
+- soundcloud playlist support
+- youtube/spotify crosslist support
+- playlist file output
+- file input
+- matrix/element support
+- cli
+- post to channel by adding to playlist
+- *secret feature*
 
+- rewrite with database
+- rewrite with elixir

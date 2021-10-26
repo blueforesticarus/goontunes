@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math/rand"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 type Entry struct {
@@ -29,17 +32,28 @@ type Entry struct {
 	Valid bool
 }
 
+func (self *Entry) CheckValid() bool {
+	if !self.Valid {
+		return false
+	}
+	if self.Service == "" || self.ID == "" || self.MessageId == "" || self.Platform == "" {
+		b, _ := json.MarshalIndent(self, "", "\t")
+		fmt.Printf("Bad Track : %s\n", string(b))
+		self.Valid = false
+	}
+	return self.Valid
+}
+
 type EntryManager struct {
-	Entries []Entry
+	Entries map[string]Entry
 	Lock    sync.RWMutex
 
-	//_entry_map map[string]*Entry
 	cachepath string
 }
 
 func new_EntryManager() *EntryManager {
 	var em EntryManager
-	em.Entries = make([]Entry, 0)
+	em.Entries = make(map[string]Entry, 0)
 	return &em
 }
 
@@ -47,14 +61,16 @@ func (self *EntryManager) add_entry(entry Entry) bool {
 	self.Lock.Lock()
 	defer self.Lock.Unlock()
 
-	for i, e := range self.Entries {
-		if e.MessageId == entry.MessageId {
-			self.Entries[i] = entry
-			return false
-		}
+	id := entry.Platform + entry.MessageId
+
+	e, ok := self.Entries[id]
+	if ok && e.CheckValid() {
+		self.Entries[id] = entry
+		return false
+	} else {
+		self.Entries[id] = entry
+		return true
 	}
-	self.Entries = append(self.Entries, entry)
-	return true
 }
 
 func (self *EntryManager) save() {
@@ -82,6 +98,11 @@ func (self *EntryManager) load() {
 	} else {
 		fmt.Printf("loaded %s\n", self.cachepath)
 	}
+
+	for k, v := range self.Entries {
+		v.CheckValid()
+		self.Entries[k] = v
+	}
 }
 
 //Used by discord.go to know how far back to look for messages
@@ -106,7 +127,8 @@ type Library struct {
 	Collections map[string]*Collection
 	Lock        sync.RWMutex
 
-	_track_map map[string]*Track
+	_track_map map[string]int
+	_id_skip   map[string]bool
 	cachepath  string
 }
 
@@ -114,7 +136,8 @@ func new_Library() *Library {
 	var lib Library
 	lib.Tracks = make([]*Track, 0)
 	lib.Collections = make(map[string]*Collection)
-	lib._track_map = make(map[string]*Track)
+	lib._track_map = make(map[string]int)
+	lib._id_skip = make(map[string]bool)
 	return &lib
 }
 
@@ -143,24 +166,38 @@ func (self *Library) load() {
 	} else {
 		fmt.Printf("loaded %s\n", self.cachepath)
 	}
+
+	for i, t := range self.Tracks {
+		if !t.Valid(false) {
+			self.Tracks[i] = nil
+		}
+	}
+	for k, c := range self.Collections {
+		if !c.Valid(false) {
+			delete(self.Collections, k)
+		}
+	}
 }
 
 func (self *Library) getTrack(id string) *Track {
 	self.Lock.RLock()
-	track := self._track_map[id]
-	if track != nil {
-		if !contains_a_fucking_string(track.IDs, id) {
-			panic("uh oh")
+	index, ok := self._track_map[id]
+	if ok {
+		track := self.Tracks[index]
+		if track != nil {
+			if !contains_a_fucking_string(track.IDs, id) {
+				panic("uh oh")
+			}
+			self.Lock.RUnlock()
+			return track
 		}
-		self.Lock.RUnlock()
-		return track
 	}
 
-	for _, track := range self.Tracks {
+	for index, track := range self.Tracks {
 		if contains_a_fucking_string(track.IDs, id) {
 			self.Lock.RUnlock()
 			self.Lock.Lock()
-			self._track_map[id] = track
+			self._track_map[id] = index
 			self.Lock.Unlock()
 			return track
 		}
@@ -169,34 +206,100 @@ func (self *Library) getTrack(id string) *Track {
 	return nil
 }
 
-func (self *Library) getTracks(id string) []*Track {
+func (self *Library) getTracks(id string, filter *Filter) []*Track {
 	//no lock because it would deadlock when getTrack locks
 	self.Lock.RLock()
 	c, ok := self.Collections[id]
 	self.Lock.RUnlock()
 
 	if ok {
-		tl := make([]*Track, len(c.TracksIDs))
-		for i, t := range c.TracksIDs {
-			tl[i] = self.getTrack(t)
+		if c.Ignored {
+			return nil
+		}
+		if filter != nil && !filter.PassCollection(*c) {
+			return nil
+		}
+		tl := make([]*Track, 0, len(c.TracksIDs))
+		for _, t := range c.TracksIDs {
+			/* No good way to pass on filter
+			tt := self.getTracks(t, nil)
+			for _, v := range tt {
+				tl = append(tl, v)
+			}
+			*/
 			if t == "" {
 				fmt.Printf("error with collection %s\n", c.ID)
 				return []*Track{}
 			}
-			if tl[i] == nil {
+
+			tt := self.getTrack(t)
+			if tt == nil {
 				fmt.Printf("error with collection %s track %s\n", c.ID, t)
 				return []*Track{}
 			}
+			tl = append(tl, tt)
 		}
 		return tl
 	} else {
 		t := self.getTrack(id)
 		if t != nil {
+			if filter != nil && !filter.PassTrack(*t) {
+				return nil
+			}
 			return []*Track{t}
 		} else {
-			return []*Track{}
+			return nil
 		}
 	}
+}
+
+func (self *Library) addTrack(track Track) (*Track, bool) {
+	//it is a bug for a track to not have any IDs
+	t0 := self.getTrack(track.IDs[0])
+
+	track.Index = -1
+	lt := make([]*Track, 0, len(track.IDs)+1)
+	for _, id := range track.IDs {
+		t1 := self.getTrack(id)
+		if t1 != nil {
+			repeat := false
+			for _, t := range lt {
+				if t.Index == t1.Index {
+					repeat = true
+				}
+			}
+			if !repeat {
+				lt = append(lt, t1)
+			}
+		}
+	}
+
+	if len(lt) > 0 {
+		lt = append(lt, &track)
+		self.mergeTracks(lt...)
+	} else {
+		self.Lock.Lock()
+		track.Index = len(self.Tracks)
+		self.Tracks = append(self.Tracks, &track)
+		self.Lock.Unlock()
+	}
+
+	t := self.getTrack(track.IDs[0])
+	if t0 != nil && reflect.DeepEqual(*t, *t0) /*XXX bugged*/ {
+		return t, false
+	}
+	return t, true
+}
+
+func (self *Library) mergeTracks(tracks ...*Track) {
+	self.Lock.Lock()
+	for i := 1; i < len(tracks); i++ {
+		tracks[0].Merge(*tracks[i])
+		if tracks[i].Index != -1 {
+			self.Tracks[tracks[i].Index] = nil
+		}
+	}
+	self.Lock.Unlock()
 }
 
 func (self *Library) getCollection(id string) *Collection {
@@ -206,33 +309,73 @@ func (self *Library) getCollection(id string) *Collection {
 	return c
 }
 
-func (self *Library) addCollection(c Collection) {
+func (self *Library) addCollection(c Collection) (*Collection, bool) {
 	self.Lock.Lock()
-	self.Collections[c.ID] = &c
-	self.Lock.Unlock()
-}
-
-func (self *Library) addTrack(track *Track) *Track {
-	self.Lock.Lock()
-	track.Index = len(self.Tracks)
-	self.Tracks = append(self.Tracks, track)
-	self.Lock.Unlock()
-	return self.getTrack(track.IDs[0])
-}
-
-func (self *Library) mergeTrack(t1 *Track, t2 *Track) {
-	self.Lock.Lock()
-	defer self.Lock.Unlock()
-
-	if self.Tracks[t2.Index] == t2 {
-		self.Tracks[t2.Index] = nil
+	p, ok := self.Collections[c.ID]
+	if !ok || p.Service != c.Service || p.ID != c.ID {
+		self.Collections[c.ID] = &c
+	} else {
+		if len(c.TracksIDs) > 0 {
+			p.TracksIDs = c.TracksIDs
+			p.Rev = c.Rev
+			p.Date = c.Date
+		}
+		if c.Name != "" {
+			p.Ignored = c.Ignored
+			p.Name = c.Name
+		}
+		p.Type = c.Type
 	}
+	self.Lock.Unlock()
+	ret := self.getCollection(c.ID)
+	if ok && cmp.Equal(*ret, *p) /*XXX bugger*/ {
+		return ret, false
+	} else {
+		return ret, true
+	}
+}
 
-	if t1.SpotifyInfo == nil {
+//Eventually this should be replaced with universe.
+type Track struct {
+	SpotifyInfo      Cached_SpotifyInfo
+	SpotifyExtraInfo Cached_SpotifyExtraInfo
+
+	YoutubeInfo Cached_YoutubeInfo
+
+	Index  int            //internal index
+	IDs    []string       //all IDs (maybe multible youtube videos)
+	IDMaps map[string]int //Service -> which ID in IDs
+	/*
+		isn't this be in __Info structs, yes! but this list contains the info
+		(and only the info) needed to map Entry to Track. Note. that we fully
+		rely on ids from platforms never having conflicts,
+		I just kinda assume they are differnt sizes, sue me
+
+		Use this ONLY for mapping, this is NOT for finding data later.
+	*/
+}
+
+func (self Track) Valid(dopanic bool) bool {
+	if len(self.IDs) == 0 || len(self.IDMaps) == 0 {
+		b, _ := json.MarshalIndent(self, "", "\t")
+		if dopanic {
+			panic(string(b))
+		} else {
+			fmt.Printf("Bad Track : %s\n", string(b))
+		}
+		return false
+	}
+	return true
+}
+
+func (t1 *Track) Merge(t2 Track) {
+	if t2.SpotifyInfo.Initialized {
 		t1.SpotifyInfo = t2.SpotifyInfo
+	}
+	if t2.SpotifyExtraInfo.Initialized {
 		t1.SpotifyExtraInfo = t2.SpotifyExtraInfo
 	}
-	if t1.YoutubeInfo == nil {
+	if t2.YoutubeInfo.Initialized {
 		t1.YoutubeInfo = t2.YoutubeInfo
 	}
 
@@ -248,26 +391,32 @@ func (self *Library) mergeTrack(t1 *Track, t2 *Track) {
 		}
 		t1.IDMaps[t2_service] = ii
 	}
+
+	return
 }
 
-//Eventually this should be replaced with universe.
-type Track struct {
-	SpotifyInfo      *SpotifyInfo
-	SpotifyExtraInfo *SpotifyExtraInfo
+func (self *Track) GetId(service string) (string, bool) {
+	i, ok := self.IDMaps[service]
+	if ok {
+		return self.IDs[i], ok
+	} else {
+		return "", ok
+	}
+}
 
-	YoutubeInfo *YoutubeInfo
+func make_tracks(ids []string, service string) []Track {
+	tracks := make([]Track, len(ids))
+	for i, id := range ids {
+		tracks[i] = make_track(id, service)
+	}
+	return tracks
+}
 
-	Index  int            //internal index
-	IDs    []string       //all IDs (maybe multible youtube videos)
-	IDMaps map[string]int //Service -> which ID in IDs
-	/*
-		isn't this be in __Info structs, yes! but this list contains the info
-		(and only the info) needed to map Entry to Track. Note. that we fully
-		rely on ids from platforms never having conflicts,
-		I just kinda assume they are differnt sizes, sue me
-
-		Use this ONLY for mapping, this is NOT for finding data later.
-	*/
+func make_track(id, service string) Track {
+	return Track{
+		IDs:    []string{id},
+		IDMaps: map[string]int{service: 0},
+	}
 }
 
 type Collection struct {
@@ -275,11 +424,73 @@ type Collection struct {
 	//Unlike Track, these are not unified across services.
 	//Once again, we just hope there are no cross service ID conflicts
 	ID        string
-	TracksIDs []string
+	TracksIDs []string //can be nil
 
-	Service string //collection are single service
-	Rev     string //revision, optional
-	Name    string //for my sanity
+	Service string    //collection are single service
+	Type    string    //playlist or album
+	Ignored bool      //whether to ignore
+	Rev     string    //revision, optional
+	Date    time.Time //when we got the data
+	Name    string    //for my sanity
+}
+
+func (self Collection) Valid(dopanic bool) bool {
+	if self.ID == "" || self.Service == "" {
+		b, _ := json.MarshalIndent(self, "", "\t")
+		if dopanic {
+			panic(string(b))
+		} else {
+			fmt.Printf("Bad Collection : %s\n", string(b))
+		}
+		return false
+	}
+	return true
+}
+
+type Filter struct {
+	Playlist string
+	Album    bool
+	Track    bool
+}
+
+func (self Filter) PassCollection(c Collection) bool {
+	if c.Type == "playlist" {
+		if self.Playlist == "" {
+			return false
+		}
+		if self.Playlist == "all" {
+			return true
+		}
+		if self.Playlist != c.Name {
+			return false
+		}
+	}
+	if c.Type == "album" {
+		return self.Album
+	}
+	return true
+}
+func (self Filter) PassTrack(t Track) bool {
+	return self.Track
+}
+
+func (self Filter) PassEntry(e Entry) bool {
+	if e.Type == "playlist" && self.Playlist == "" {
+		return false
+	}
+	if e.Type == "album" && !self.Album {
+		return false
+	}
+	if e.Type == "track" && !self.Track {
+		return false
+	}
+	return true
+}
+
+var DefaultFilter = Filter{
+	Playlist: "",
+	Album:    true,
+	Track:    true,
 }
 
 type Playlist struct {
@@ -290,13 +501,19 @@ type Playlist struct {
 	Shuffle int
 	Reverse bool
 
-	Type string
+	Filter *Filter
+
+	Contributors []string
 
 	tracks       []*Track
 	last_rebuild time.Time
 }
 
 func (self *Playlist) Rebuild() bool {
+	if self.Filter == nil {
+		self.Filter = &DefaultFilter
+	}
+
 	accept := func(entry *Entry) bool {
 		//channel matching
 		if len(self.Channels) != 0 {
@@ -306,14 +523,8 @@ func (self *Playlist) Rebuild() bool {
 		}
 
 		//type
-		if self.Type == "discover" {
-			if entry.Type != "playlist" {
-				return false
-			}
-		} else { //default
-			if "album" != entry.Type && "track" != entry.Type {
-				return false
-			}
+		if self.Filter != nil {
+			return self.Filter.PassEntry(*entry)
 		}
 		return true
 	}
@@ -325,10 +536,10 @@ func (self *Playlist) Rebuild() bool {
 		b time.Time
 	}
 
-	el := make([]*Entry, 0, len(global.em.Entries))
-	for i, e := range global.em.Entries {
+	el := make([]Entry, 0, len(global.em.Entries))
+	for _, e := range global.em.Entries {
 		if accept(&e) {
-			el = append(el, &global.em.Entries[i])
+			el = append(el, e)
 		}
 	}
 
@@ -352,7 +563,7 @@ func (self *Playlist) Rebuild() bool {
 				repeat_entry[e.ID] = true
 			}
 		}
-		tl = append(tl, global.lib.getTracks(e.ID)...)
+		tl = append(tl, global.lib.getTracks(e.ID, self.Filter)...)
 	}
 
 	if self.Shuffle != 0 {

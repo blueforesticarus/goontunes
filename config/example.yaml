@@ -1,39 +1,56 @@
-# this is a yaml, copy to .config and set up with your values
 cachepath: .cache
 discord:
-    token: <yours> #see readme
-    channels: # replace with your values
-     -  437954211457277709 #real
-     -  878343616712880162 #test server
+    token: <yours>
+    channels:
+     -  437954211557277709 #real
+     -  878361616712880162 #test playlist
+
+manual:
+    mydiscover: [https://open.spotify.com/playlist/<yours>] 
 
 playlists:
  -  name: default
     channels:
-     -  437954211457277709
+     -  437954211557277709
     norepeat: false
+    filter:
+        track: true
+        album: true
     reverse: true
 
  -  name: testing
     channels:
-     -  878343616712880162
+     -  878361616712880162
+    filter:
+        playlist: all
+        track: true
+        album: true
     norepeat: true
     shuffle: 239847239749
 
  -  name: weekly
-    type: discover
+    filter:
+        playlist: Discover Weekly
+    norepeat: true
+ -  name: mydiscover
+    channels: [mydiscover]
+    filter:
+        playlist: all
     norepeat: true
 
 spotify:
     cachetoken: true
     clientid: <yours>
     clientsecret: <yours>
-    redirect_uri: http://localhost:<port>
+    redirect_uri: http://localhost:<yours>
 
     playlists:
-     # you can comment out sections
-     #-  name: GoonTunes Test Server 
-     #   sync: testing
-     -  id: 22rFrNdZ7fZuq8LhmkSjST
+     -  id: <your spotify playlist id>
         sync: default
-     -  name: GoonWeekly
+     -  name: Test Server
+        sync: testing
+     -  name: Weekly
         sync: weekly
+     -  name: Discover Forever
+        sync: mydiscover
+        nodelete: true

@@ -8,7 +8,8 @@ playlists:
  -  name: default
     reverse: true
  -  name: weekly
-    type: discover
+    filter:
+        playlist: "Discover Weekly"
     norepeat: true
 
 spotify:

@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"sort"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/blueforesticarus/goontunes/util"
@@ -43,10 +46,28 @@ type SpotifyPlaylist struct {
 	ID   string
 	Name string
 
-	Sync string //the internal playlist to sync to
-	//NoDelete bool TODO
+	Sync     string //the internal playlist to sync to
+	NoDelete bool
 
 	cache *Collection
+}
+
+func (self *SpotifyPlaylist) Save() {
+	bytes, _ := json.MarshalIndent(self.cache, "", "")
+	_ = ioutil.WriteFile(self.cachepath(), bytes, 0644)
+}
+
+func (self *SpotifyPlaylist) Load() {
+	bytes, err := ioutil.ReadFile(self.cachepath())
+	if err != nil {
+		return
+	}
+
+	err = json.Unmarshal([]byte(bytes), &self.cache)
+}
+
+func (self *SpotifyPlaylist) cachepath() string {
+	return global.CachePath + "/" + self.ID + ".sp"
 }
 
 func (self *SpotifyPlaylist) Scan() error {
@@ -67,6 +88,7 @@ func (self *SpotifyPlaylist) Scan() error {
 			return fmt.Errorf("could not update playlist cache")
 		}
 		self.cache = c
+		self.Save()
 	}
 	return nil
 }
@@ -88,6 +110,11 @@ func (self *SpotifyPlaylist) Update(p *Playlist) {
 	} else {
 	}
 
+	current := make([]string, len(self.cache.TracksIDs))
+	for i, v := range self.cache.TracksIDs {
+		current[i] = v
+	}
+
 	//get just the strings, filter things missing spot info
 	target := make([]string, 0, len(p.tracks))
 	for _, v := range p.tracks {
@@ -99,17 +126,22 @@ func (self *SpotifyPlaylist) Update(p *Playlist) {
 		i, ok := v.IDMaps["spotify"]
 
 		id := v.IDs[i]
-		if ok && id != "" {
+		if ok && id != "" && v.SpotifyInfo.V != nil {
+			if self.NoDelete && contains_a_fucking_string(current, id) {
+				// we skip duplicates for nodelete, kinda have to
+				continue
+			}
+
 			target = append(target, id)
 		}
 	}
 
-	fmt.Printf("Attempting to sync %d/%d tracks\n", len(target), len(p.tracks))
-
-	current := make([]string, len(self.cache.TracksIDs))
-	for i, v := range self.cache.TracksIDs {
-		current[i] = v
+	if self.NoDelete {
+		//for nodelete we target the playlist plus current
+		target = append(target, current...)
 	}
+
+	fmt.Printf("Attempting to sync %d/%d tracks\n", len(target), len(p.tracks))
 
 	//compute delta
 	rm_list := make([]spotify.TrackToRemove, 0, 100)
@@ -129,7 +161,8 @@ func (self *SpotifyPlaylist) Update(p *Playlist) {
 		}
 
 		if v.Tag == 'i' || v.Tag == 'r' {
-			asdf := B{target[v.J1:v.J2], v.J1}
+			var asdf B
+			asdf = B{target[v.J1:v.J2], v.J1}
 			ins_list = append(ins_list, asdf)
 		}
 	}
@@ -207,6 +240,9 @@ func (self *SpotifyPlaylist) idcache() string {
 }
 
 func (self *SpotifyApp) connect() {
+	global.plumber.j_playlist_task.Set(1)
+	defer global.plumber.j_playlist_task.Set(-1)
+
 	self.ready.Add(1)
 	if self.ClientID == "" || self.ClientID == "<yours>" {
 		log.Fatalf("DISCORD: Generate a client id and secret following the instructions here: %s\n", helpurl)
@@ -227,24 +263,25 @@ func (self *SpotifyApp) connect() {
 	fmt.Println("SPOTIFY: You are logged in as:", user.ID)
 	self.userid = user.ID
 
-	self.init_playlists()
 	self.ready.Done()
+	self.init_playlists()
 }
 
 func (self *SpotifyApp) init_playlists() {
-	//TODO this is an example of a function where the prints would benefit from graph structure
-
 	userplaylists := self.list_playlists(self.userid)
 
 	for _, p := range self.Playlists {
+		var v *spotify.FullPlaylist = nil
 		if p.ID == "" {
 			if p.Name == "" {
 				break //ignore
 			}
-			bytes, err := os.ReadFile(p.idcache())
-			p.ID = string(bytes)
 
-			if err != nil || self.fetch_playlist(p.ID) == nil {
+			bytes, _ := os.ReadFile(p.idcache())
+			p.ID = string(bytes)
+			v = self.fetch_playlist(p.ID)
+
+			if v == nil {
 				p.ID = string(userplaylists[p.Name].ID)
 				if p.ID == "" {
 					p.ID = self.create_playlist(p.Name)
@@ -253,14 +290,22 @@ func (self *SpotifyApp) init_playlists() {
 			}
 		}
 
-		v := self.fetch_playlist(p.ID)
 		if v == nil {
-			fmt.Printf("SPOTIFY: configured playlist %s unavailable\n", p.ID)
+			v = self.fetch_playlist(p.ID)
+		}
+
+		if v == nil {
+			fmt.Printf("SPOTIFY: configured playlist %s:%s unavailable\n", p.ID, p.Name)
 		} else {
 			fmt.Printf("SPOTIFY: configured playlist %s found \"%s\"\n", p.ID, v.Name)
-			c := self.fetch_playlist_tracks(v)
-			if c != nil {
-				p.cache = c
+			p.Load()
+
+			if p.cache == nil || p.cache.Rev != v.SnapshotID {
+				c := self.fetch_playlist_tracks(v)
+				if c != nil {
+					p.cache = c
+					p.Save()
+				}
 			}
 		}
 	}
@@ -309,7 +354,13 @@ func (self *SpotifyApp) create_playlist(name string) string {
 	return pl.ID.String()
 }
 
+/*
+Below here are the the functions called by plumber
+*/
+
 func (self *SpotifyApp) find_discover(name string) string {
+	self.ready.Wait()
+
 	for _, playlist := range self.list_playlists(name) {
 		if playlist.Owner.ID == "spotify" && playlist.Name == "Discover Weekly" {
 			return string(playlist.ID) //probably breaks if users link have saved someone elses discover weekly
@@ -318,17 +369,22 @@ func (self *SpotifyApp) find_discover(name string) string {
 	return ""
 }
 
-func (self *SpotifyApp) fetch_tracks_info(Ids []string) []*SpotifyInfo {
-	ret := make([]*SpotifyInfo, len(Ids))
+func (self *SpotifyApp) fetch_tracks_info(Ids []string) map[string]*SpotifyInfo {
+	self.ready.Wait()
+
+	ret := make(map[string]*SpotifyInfo, len(Ids))
 	foo := func(offset int, idss []string) {
-		a := fuckshit(idss)
-		tl, err := self.client.GetTracks(context.Background(), a)
+		tl, err := self.client.GetTracks(context.Background(), fuckshit(idss))
 		if err != nil {
 			fmt.Printf("SPOTIFY: Failed to get tracks, %v\n", err)
 			return
 		}
 		for i, track := range tl {
-			ret[offset+i] = track
+			if track == nil {
+				fmt.Printf("SPOTIFY: Missing track audio features %s\n", idss[i])
+			} else {
+				ret[string(track.ID)] = track
+			}
 		}
 	}
 	util.Batched(foo, Ids, 50, false)
@@ -336,24 +392,32 @@ func (self *SpotifyApp) fetch_tracks_info(Ids []string) []*SpotifyInfo {
 	return ret
 }
 
-func (self *SpotifyApp) fetch_tracks_extrainfo(Ids []string) []*SpotifyExtraInfo {
-	ret := make([]*SpotifyExtraInfo, len(Ids))
-	foo := func(offset int, idss []string) {
+func (self *SpotifyApp) fetch_tracks_extrainfo(Ids []string) map[string]*SpotifyExtraInfo {
+	self.ready.Wait()
+
+	ret := make(map[string]*SpotifyExtraInfo, len(Ids))
+	foo := func(_ int, idss []string) {
 		tl, err := self.client.GetAudioFeatures(context.Background(), fuckshit(idss)...)
 		if err != nil {
 			fmt.Printf("SPOTIFY: Failed to get track audio features, %v\n", err)
 			return
 		}
 		for i, audiofeatures := range tl {
-			ret[offset+i] = audiofeatures
+			if audiofeatures == nil {
+				fmt.Printf("SPOTIFY: Missing track audio features %s\n", idss[i])
+			} else {
+				ret[string(audiofeatures.ID)] = audiofeatures
+			}
 		}
 	}
-	util.Batched(foo, Ids, 100, false)
+	util.Batched(foo, Ids, 100, false) //redundant with plumber
 	fmt.Printf("SPOTIFY: got extra info for %d tracks\n", len(Ids))
 	return ret
 }
 
 func (self *SpotifyApp) fetch_album_tracks(Ids []string) []Collection {
+	self.ready.Wait()
+
 	// This will return an empty list for any album which has more than 50 tracks
 	// this is due to track limits in spotifys api, and because at that point its more like a playlist, which is ignored.
 	ret := make([]Collection, len(Ids))
@@ -389,7 +453,13 @@ func (self *SpotifyApp) fetch_album_tracks(Ids []string) []Collection {
 				}
 			}
 
-			ret[i+offset] = Collection{ID: album.ID.String(), TracksIDs: trackids, Service: "spotify"}
+			ret[i+offset] = Collection{
+				ID:        album.ID.String(),
+				TracksIDs: trackids,
+				Service:   "spotify",
+				Date:      time.Now(),
+				Type:      "album",
+			}
 		}
 
 	}
@@ -399,6 +469,11 @@ func (self *SpotifyApp) fetch_album_tracks(Ids []string) []Collection {
 }
 
 func (self *SpotifyApp) fetch_playlist(ID string) *spotify.FullPlaylist {
+	self.ready.Wait()
+	if ID == "" {
+		return nil
+	}
+
 	//fields := spotify.Fields("name,snapshot_id,tracks(href,limit,next,offset,previous,total,items(track(id))),id,owner(id)") //100 tracks per request, better than 50
 	pl, err := self.client.GetPlaylist(context.Background(), spotify.ID(ID)) //fields)
 	if err != nil {
@@ -410,6 +485,8 @@ func (self *SpotifyApp) fetch_playlist(ID string) *spotify.FullPlaylist {
 }
 
 func (self *SpotifyApp) fetch_playlist_tracks(pl *spotify.FullPlaylist) *Collection {
+	self.ready.Wait()
+
 	if pl == nil {
 		return nil
 	}
@@ -444,6 +521,7 @@ func (self *SpotifyApp) fetch_playlist_tracks(pl *spotify.FullPlaylist) *Collect
 		Service:   "spotify",
 		TracksIDs: trackids,
 		Name:      pl.Name,
+		Type:      "playlist",
 	}
 	fmt.Printf("SPOTIFY: got playlist %s with %d tracks\n", pl.ID, len(trackids))
 	return &ret

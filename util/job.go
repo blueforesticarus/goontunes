@@ -2,173 +2,169 @@ package util
 
 import (
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/enriquebris/goconcurrentqueue"
 )
 
+/*
+A job wraps an input and many outputs
+*/
+
+var Pin sync.WaitGroup
+
 type Job struct {
-	cond  sync.Cond
-	queue []string
+	Input   Outputs
+	inout   InOut
+	outputs Outputs
 
 	hot sync.Map
-	//die bool TODO killable
 
-	pause  int32 // 0 to unpause
-	active uint32
+	_id     func(interface{}) string
+	_worker func(...interface{})
 
-	idle sync.Cond
+	Disable bool
 }
 
-func (job *Job) Spinup(worker func([]string), batchsize int, maxparallel uint32, permithot bool) {
-	job.queue = make([]string, 0, 50)
-	job.cond = *sync.NewCond(&sync.Mutex{})
-	job.idle = *sync.NewCond(&sync.Mutex{})
-	//job.Lock is signaled every time Ids is altered
-	//we want to start the worker function any time
-	//A: no workers are running and there is at least one thing in the queue
-	//or B: the queue has batchsize items
+func (self *Job) Set(n int) {
+	//inputs and outputs
+	self.Input.Set(n)
+	self.inout.Set(n)
+	self.outputs.Set(n)
+}
 
-	foo := func(batch []string) {
-		if permithot {
-			for _, s := range batch {
-				job.hot.Delete(s)
+func (self *Job) Add(v Blockable) {
+	self.outputs.Add(v)
+}
+
+func (self *Job) Plumb(values ...interface{}) {
+	if self.Disable {
+		return
+	}
+
+	if self._id != nil {
+		var i = 0
+		for _, v := range values {
+			_, loaded := self.hot.LoadOrStore(self._id(v), false)
+			if !loaded {
+				values[i] = v
+				i++
 			}
 		}
-		worker(batch) //must be blocking
+		values = values[0:i]
+	}
+	self.outputs.Set(len(values)) //only outputs
+	self.inout.Plumb(values...)
+}
 
-		//the idle cond really messing stuff up
-		if atomic.LoadUint32(&job.active) == 1 {
-			empty := job.None()
+func (self *Job) Spinup(worker func(...interface{}), n int) {
+	self.inout.queue = goconcurrentqueue.NewFIFO()
+	self._worker = worker
 
-			job.idle.L.Lock()
-			a := atomic.AddUint32(&job.active, ^uint32(0)) //decrement
-			if a == 0 && empty {
-				job.idle.Broadcast()
-			}
-			job.idle.L.Unlock()
-		} else {
-			atomic.AddUint32(&job.active, ^uint32(0)) //decrement
-		}
-
-		if !permithot {
-			for _, s := range batch {
-				job.hot.Delete(s)
+	foo := func(values []interface{}) {
+		if self._id != nil {
+			for _, v := range values {
+				id := self._id(v)
+				self.hot.Store(id, true)
+				defer self.hot.Delete(id)
 			}
 		}
-		if atomic.LoadInt32(&job.pause) == 0 {
-			job.cond.Broadcast() //wakeup Wait in for loop
-		}
+		worker(values...)
+		self.outputs.Set(-len(values))
 	}
 
 	go func() {
-		job.cond.L.Lock() //must start locked
-
+		Pin.Wait()
 		for {
-			pause := atomic.LoadInt32(&job.pause) > 0
-			if !pause && len(job.queue) > 0 {
-				a := atomic.LoadUint32(&job.active)
-				if len(job.queue) > batchsize {
-					if a < maxparallel {
-						atomic.AddUint32(&job.active, 1)
-						go foo(job.queue[:batchsize])
-						job.queue = job.queue[batchsize:]
-						continue
-					}
-				} else if a == 0 {
-					atomic.AddUint32(&job.active, 1)
-					go foo(job.queue[:]) //pretty sure the next line WONT undo this
-					job.queue = make([]string, 0, 50)
-				}
-			}
-			job.cond.Wait()
+			values := self.inout.PollN(1, n)
+			foo(values)
 		}
 	}()
 }
 
-func (job *Job) Add(id string) {
-	_, hot := job.hot.LoadOrStore(id, true)
-	if !hot {
-		job.cond.L.Lock()
-		job.queue = append(job.queue, id)
-		job.cond.L.Unlock()
+func (self *Job) FilterRepeats(id func(interface{}) string) {
+	self._id = id
+}
 
-		// only need to wakeup if we are not paused
-		if atomic.LoadInt32(&job.pause) == 0 {
-			job.cond.Broadcast() //wakeup spinup
-		}
+type WaitJob struct {
+	Job
+	waiter Block
+}
+
+func (self *WaitJob) Spinup(worker func(...interface{}), n int) {
+	self.Job.Input.Add(&self.waiter)
+
+	self.Job.Spinup(func(v ...interface{}) {
+		self.waiter.Wait()
+		worker(v...)
+	}, n)
+}
+
+type TriggerJob struct {
+	WaitJob
+}
+
+func (self *TriggerJob) Trigger() {
+	self.Plumb("")
+}
+
+func (self *TriggerJob) Spinup(worker func()) {
+	bar := func(_ interface{}) string { return "" }
+	self.FilterRepeats(bar)
+	foo := func(_ ...interface{}) {
+		//because trigger jobs are normally state dependant... once we start, any triggers mean what we are doing will be out of data!
+		//this line will prevent repeat filtering after this point
+		self.hot.Delete("")
+
+		worker()
+	}
+	self.WaitJob.Spinup(foo, 1)
+}
+
+type CooldownJob struct {
+	TriggerJob
+}
+
+func (self *CooldownJob) Spinup(worker func(), n int) {
+	foo := func() {
+		self.hot.Delete("")
+		worker()
+		time.Sleep(time.Second * time.Duration(n))
+	}
+	self.TriggerJob.Spinup(foo)
+}
+
+/*
+This plumbs into other stuff syncronously
+lookin kinda empty
+Its just a input and output with no Inbetween
+*/
+type Delegate struct {
+	Inputs  Outputs
+	outputs Outputs
+	Foo     func(interface{})
+}
+
+func (self *Delegate) Add(v Blockable) {
+	self.outputs.Add(v)
+}
+
+func (self *Delegate) AddJob(v Output) {
+	self.Inputs.Add(v)
+	v.Add(&self.outputs)
+}
+
+func (self *Delegate) Set(n int) {
+	self.Inputs.Set(n)
+	self.outputs.Set(n)
+}
+
+func (self *Delegate) Plumb(values ...interface{}) {
+	for _, v := range values {
+		self.Foo(v)
 	}
 }
 
-//added in order to prevent unnessecary small batches
-func (job *Job) Pause(pause bool) {
-	if pause {
-		atomic.AddInt32(&job.pause, 1)
-	} else {
-		ret := atomic.AddInt32(&job.pause, -1)
-		if ret < 0 {
-			panic("Job: call to unpause without call to pause")
-		}
-		if ret == 0 && len(job.queue) > 0 {
-			job.cond.Broadcast() //wakeup spinup
-		}
-	}
-}
-
-// For cooldown type jobs,
-// TODO probably rewrite this in a more sensible way
-type CooldownJob = Job
-
-func (job *CooldownJob) Trigger() {
-	job.Add("")
-}
-
-func (job *CooldownJob) SpinupCooldown(foo func(), delay time.Duration) {
-	job.Spinup(func([]string) {
-		foo()
-		time.Sleep(delay)
-	}, 1, 1, true)
-}
-
-// For the playlist task
-func (job *Job) None() bool {
-	job.cond.L.Lock()
-	a := len(job.queue)
-	job.cond.L.Unlock()
-	return a == 0
-}
-
-// For the playlist task
-func (job *Job) IsIdle() bool {
-	return atomic.LoadUint32(&job.active) == 0
-}
-
-func WaitOnIdle(jobs ...*Job) {
-OUTER:
-	for {
-		for _, j := range jobs {
-			j.WaitOnIdle()
-		}
-		for _, j := range jobs {
-			if !j.IsIdle() && j.None() {
-				continue OUTER
-			}
-		}
-		break
-	}
-}
-
-func (job *Job) WaitOnIdle() {
-	job.idle.L.Lock()
-	for {
-		if job.IsIdle() {
-			job.idle.L.Unlock()
-			if job.None() && job.IsIdle() {
-				return
-			} else {
-				job.idle.L.Lock()
-				continue
-			}
-		}
-		job.idle.Wait()
-	}
+func Depends(source Output, sink Blockable) {
+	source.Add(sink)
 }
