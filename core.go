@@ -106,7 +106,7 @@ func (self *EntryManager) load() {
 }
 
 //Used by discord.go to know how far back to look for messages
-func (em *EntryManager) Latest(platform string, channel string) Entry {
+func (em *EntryManager) Latest(platform string, channel string) string {
 	em.Lock.RLock()
 	defer em.Lock.RUnlock()
 
@@ -119,7 +119,7 @@ func (em *EntryManager) Latest(platform string, channel string) Entry {
 			}
 		}
 	}
-	return latest
+	return latest.MessageId
 }
 
 type Library struct {
@@ -428,6 +428,8 @@ type Collection struct {
 
 	Service string    //collection are single service
 	Type    string    //playlist or album
+	Owner   string    //used by List_Playlist
+	Size    int       //useful to pass length before we know the track list
 	Ignored bool      //whether to ignore
 	Rev     string    //revision, optional
 	Date    time.Time //when we got the data

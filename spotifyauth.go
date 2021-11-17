@@ -154,7 +154,7 @@ func open_url_in_browser(url string) {
 		args = []string{"/c", "start"}
 	case "darwin":
 		cmd = "open"
-	default: // "linux", "freebsd", "openbsd", "netbsd"
+	default: // "linux", "freebsd", "openbsd", "neOtbsd"
 		cmd = "xdg-open"
 	}
 	args = append(args, url)
@@ -162,7 +162,7 @@ func open_url_in_browser(url string) {
 }
 
 func authentication_flow(config *oauth2.Config) *oauth2.Token {
-	//TODO: https://github.com/zmb3/spotify/blob/master/examples/authenticate/pkce/pkce.go
+	//TODO: https://github.com/zmb3/spotify/blob/master/examples//icate/pkce/pkce.go
 	ret := regexp.MustCompile(`localhost(:\d+)`).FindStringSubmatch(config.RedirectURL)
 	if ret == nil {
 		fmt.Printf("SPOTIFY: bad Redirect_Uri:%s must be localhost:port\n", config.RedirectURL)

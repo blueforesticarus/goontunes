@@ -80,11 +80,14 @@ func main() {
 	global.lib.load()
 
 	global.plumber = new_Plumber()
-	global.Discord.output = &global.plumber.d_entry
+
+	global.Discord.Init(&global.plumber.d_entry, global.em.Latest)
 
 	go global.Spotify.connect()
-	go global.Discord.connect()
+	go global.Discord.Connect()
 	go process_manual()
+
+	global.plumber.rescan() // no  reason not to do this concurrent with Discord init, I think
 
 	c := cron.New()
 	c.AddFunc("@every 1h", func() {

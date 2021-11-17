@@ -2,19 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"log"
-	"os"
-	"sort"
 	"sync"
 	"time"
 	"unsafe"
 
 	"github.com/blueforesticarus/goontunes/util"
-	"github.com/lytics/base62"
-	"github.com/pmezard/go-difflib/difflib"
 	"github.com/zmb3/spotify/v2"
 )
 
@@ -25,6 +19,18 @@ func shitfuck(Ids []spotify.ID) []string {
 	return *(*[]string)(unsafe.Pointer(&Ids))
 }
 
+func SimplePl2Collection(pl spotify.SimplePlaylist) Collection {
+	return Collection{
+		Name:  pl.Name,
+		ID:    pl.ID.String(),
+		Owner: pl.Owner.ID,
+		Rev:   pl.SnapshotID,
+		Type:  "Playlist",
+		Date:  time.Now(),
+		Size:  int(pl.Tracks.Total),
+	}
+}
+
 type SpotifyInfo = spotify.FullTrack
 type SpotifyExtraInfo = spotify.AudioFeatures
 
@@ -33,7 +39,7 @@ type SpotifyApp struct {
 	ClientSecret string
 	Redirect_Uri string
 
-	Playlists []*SpotifyPlaylist
+	Playlists []*ServicePlaylist
 
 	CacheToken bool
 
@@ -42,206 +48,12 @@ type SpotifyApp struct {
 	userid string
 }
 
-type SpotifyPlaylist struct {
-	ID   string
-	Name string
-
-	Sync     string //the internal playlist to sync to
-	NoDelete bool
-
-	cache *Collection
-}
-
-func (self *SpotifyPlaylist) Save() {
-	bytes, _ := json.MarshalIndent(self.cache, "", "")
-	_ = ioutil.WriteFile(self.cachepath(), bytes, 0644)
-}
-
-func (self *SpotifyPlaylist) Load() {
-	bytes, err := ioutil.ReadFile(self.cachepath())
-	if err != nil {
-		return
-	}
-
-	err = json.Unmarshal([]byte(bytes), &self.cache)
-}
-
-func (self *SpotifyPlaylist) cachepath() string {
-	return global.CachePath + "/" + self.ID + ".sp"
-}
-
-func (self *SpotifyPlaylist) Scan() error {
-	if self.ID == "" {
-		return fmt.Errorf("Playlist %s has no known ID\n", self.Name)
-	}
-
-	//get metadata
-	v := global.Spotify.fetch_playlist(self.ID)
-	if v == nil {
-		return fmt.Errorf("configured playlist %s unavailable\n", self.ID)
-	}
-
-	//update cache of playlist tracks
-	if self.cache == nil || v.SnapshotID != self.cache.Rev {
-		c := global.Spotify.fetch_playlist_tracks(v)
-		if c == nil {
-			return fmt.Errorf("could not update playlist cache")
-		}
-		self.cache = c
-		self.Save()
-	}
-	return nil
-}
-
-//higher level playlist update function
-func (self *SpotifyPlaylist) Update(p *Playlist) {
-	fmt.Printf("Begin sync of %s <-> %s\n", self.ID, p.Name)
-
-	//assume p is correct playlist, and p.rebuild called
-	err := self.Scan()
-	if err != nil {
-		fmt.Printf("Abort playlist update. %v \n", err)
-		return
-	}
-
-	if len(p.tracks) == 0 {
-		fmt.Printf("Abort playlist update. %v \n", "refusing to sync a empty playlist")
-		return
-	} else {
-	}
-
-	current := make([]string, len(self.cache.TracksIDs))
-	for i, v := range self.cache.TracksIDs {
-		current[i] = v
-	}
-
-	//get just the strings, filter things missing spot info
-	target := make([]string, 0, len(p.tracks))
-	for _, v := range p.tracks {
-		if v == nil || v.IDMaps == nil {
-			//bug
-			println("Abort playlist sync error with track")
-			return
-		}
-		i, ok := v.IDMaps["spotify"]
-
-		id := v.IDs[i]
-		if ok && id != "" && v.SpotifyInfo.V != nil {
-			if self.NoDelete && contains_a_fucking_string(current, id) {
-				// we skip duplicates for nodelete, kinda have to
-				continue
-			}
-
-			target = append(target, id)
-		}
-	}
-
-	if self.NoDelete {
-		//for nodelete we target the playlist plus current
-		target = append(target, current...)
-	}
-
-	fmt.Printf("Attempting to sync %d/%d tracks\n", len(target), len(p.tracks))
-
-	//compute delta
-	rm_list := make([]spotify.TrackToRemove, 0, 100)
-
-	type B struct {
-		ids []string
-		i   int
-	}
-	ins_list := make([]B, 0, 100)
-
-	sm := difflib.NewMatcher(current, target)
-	for _, v := range sm.GetOpCodes() {
-		if v.Tag == 'd' || v.Tag == 'r' {
-			for i := v.I1; i < v.I2; i++ {
-				rm_list = append(rm_list, spotify.NewTrackToRemove(current[i], []int{i}))
-			}
-		}
-
-		if v.Tag == 'i' || v.Tag == 'r' {
-			var asdf B
-			asdf = B{target[v.J1:v.J2], v.J1}
-			ins_list = append(ins_list, asdf)
-		}
-	}
-
-	//sort strings so that we can not worry about how snapshot code works
-	sort.Slice(ins_list, func(i, j int) bool {
-		return ins_list[i].i < ins_list[j].i //insert last first
-	})
-
-	sort.Slice(rm_list, func(i, j int) bool {
-		return rm_list[i].Positions[0] > rm_list[j].Positions[0] //sort reverse
-	})
-
-	//delete tracks
-	foo := func(o int, n int) {
-		_, err := global.Spotify.client.RemoveTracksFromPlaylistOpt(
-			context.Background(), spotify.ID(self.ID), rm_list[o:o+n], "",
-		)
-		if err != nil {
-			fmt.Printf("SPOTIFY: could not delete playlist tracks, %s\n", err)
-		} else {
-			fmt.Printf("SPOTIFY: deleted %d %d tracks\n", o, n)
-		}
-	}
-	if len(rm_list) > 0 {
-		util.BatchedRange(foo, len(rm_list), 100)
-		fmt.Printf("SPOTIFY: updated playlist %s, %d deleted\n", self.ID, len(rm_list))
-	}
-
-	//insert groups of tracks
-	var position = 0
-	var total = 0
-	bar := func(o int, idss []string) {
-		_, err := global.Spotify.client.AddTracksToPlaylistOpt(
-			context.Background(), spotify.ID(self.ID), position+o, fuckshit(idss)...,
-		)
-		if err != nil {
-			fmt.Printf("SPOTIFY: could not insert playlist tracks, %s\n", err)
-		} else {
-			fmt.Printf("SPOTIFY: inserted %d tracks\n", len(idss))
-			total += len(idss)
-		}
-	}
-
-	for _, v := range ins_list {
-		position = v.i
-		util.Batched(bar, v.ids, 100, false)
-	}
-	if total > 0 {
-		fmt.Printf("SPOTIFY: updated playlist %s, %d inserted\n", self.ID, total)
-	}
-
-	if total == 0 && len(rm_list) == 0 {
-		fmt.Printf("playlist is already correct\n")
-	}
-
-	self.Scan()
-	self.Check(target)
-}
-
-func (self *SpotifyPlaylist) Check(target []string) {
-	if self.cache == nil || len(self.cache.TracksIDs) != len(target) {
-		fmt.Printf("SPOTIFY: error detected in playlist update\n")
-		return
-	}
-	for i, v := range self.cache.TracksIDs {
-		if v != target[i] {
-			fmt.Printf("SPOTIFY: error detected in playlist update\n")
-		}
-	}
-}
-
-func (self *SpotifyPlaylist) idcache() string {
-	return global.CachePath + "/" + base62.StdEncoding.EncodeToString([]byte(self.Name))
+func (self *SpotifyApp) Name() string {
+	return "spotify"
 }
 
 func (self *SpotifyApp) connect() {
 	global.plumber.j_playlist_task.Set(1)
-	defer global.plumber.j_playlist_task.Set(-1)
 
 	self.ready.Add(1)
 	if self.ClientID == "" || self.ClientID == "<yours>" {
@@ -264,59 +76,84 @@ func (self *SpotifyApp) connect() {
 	self.userid = user.ID
 
 	self.ready.Done()
-	self.init_playlists()
-}
-
-func (self *SpotifyApp) init_playlists() {
-	userplaylists := self.list_playlists(self.userid)
 
 	for _, p := range self.Playlists {
-		var v *spotify.FullPlaylist = nil
-		if p.ID == "" {
-			if p.Name == "" {
-				break //ignore
-			}
-
-			bytes, _ := os.ReadFile(p.idcache())
-			p.ID = string(bytes)
-			v = self.fetch_playlist(p.ID)
-
-			if v == nil {
-				p.ID = string(userplaylists[p.Name].ID)
-				if p.ID == "" {
-					p.ID = self.create_playlist(p.Name)
-				}
-				os.WriteFile(p.idcache(), []byte(p.ID), 0644)
-			}
-		}
-
-		if v == nil {
-			v = self.fetch_playlist(p.ID)
-		}
-
-		if v == nil {
-			fmt.Printf("SPOTIFY: configured playlist %s:%s unavailable\n", p.ID, p.Name)
-		} else {
-			fmt.Printf("SPOTIFY: configured playlist %s found \"%s\"\n", p.ID, v.Name)
-			p.Load()
-
-			if p.cache == nil || p.cache.Rev != v.SnapshotID {
-				c := self.fetch_playlist_tracks(v)
-				if c != nil {
-					p.cache = c
-					p.Save()
-				}
-			}
-		}
+		p.Init(self)
 	}
+
+	global.plumber.j_playlist_task.Set(-1)
 }
 
-func (self *SpotifyApp) list_playlists(user string) map[string]spotify.SimplePlaylist {
-	var ret = make(map[string]spotify.SimplePlaylist)
+func (self *SpotifyApp) Get_Track_Id(track *Track) string {
+	i, ok := track.IDMaps["spotify"]
+	if ok {
+		id := track.IDs[i]
+		if id != "" && track.SpotifyInfo.V != nil {
+			return id
+		}
+	}
+	return ""
+}
+
+func (self *SpotifyApp) Playlist_InsertTracks(ID string, ins_list []Pl_Ins) int {
+	//insert groups of tracks
+	var position = 0
+	var total = 0
+	bar := func(o int, idss []string) {
+		_, err := global.Spotify.client.AddTracksToPlaylistOpt(
+			context.Background(), spotify.ID(ID), position+o, fuckshit(idss)...,
+		)
+		if err != nil {
+			fmt.Printf("SPOTIFY: could not insert playlist tracks, %s\n", err)
+		} else {
+			fmt.Printf("SPOTIFY: inserted %d tracks\n", len(idss))
+			total += len(idss)
+		}
+	}
+
+	for _, v := range ins_list {
+		position = v.i
+		util.Batched(bar, v.ids, 100, false)
+	}
+	return total
+}
+
+func (self *SpotifyApp) Playlist_DeleteTracks(ID string, rm_list []Pl_Rm) int {
+	//delete tracks
+	total := 0
+	foo := func(o int, n int) {
+
+		spot_rml := make([]spotify.TrackToRemove, n)
+		for i, v := range rm_list[o : o+n] {
+			spot_rml[i] = spotify.NewTrackToRemove(v.id, []int{v.i})
+		}
+
+		_, err := global.Spotify.client.RemoveTracksFromPlaylistOpt(
+			context.Background(), spotify.ID(ID), spot_rml, "",
+		)
+		if err != nil {
+			fmt.Printf("SPOTIFY: could not delete playlist tracks, %s\n", err)
+		} else {
+			fmt.Printf("SPOTIFY: deleted %d tracks, offset %d \n", n, o)
+			total += n
+		}
+	}
+	util.BatchedRange(foo, len(rm_list), 100)
+
+	return total
+}
+
+func (self *SpotifyApp) List_Playlists() []Collection {
+	return self.list_playlists(self.userid)
+}
+
+func (self *SpotifyApp) list_playlists(user string) []Collection {
+
+	var ret = make([]Collection, 0, 50)
 
 	pl, err := self.client.GetPlaylistsForUser(
 		context.Background(),
-		user,
+		self.userid,
 		spotify.Fields("href,limit,next,previous,total,offset,items(id,name,owner(id),description)"),
 		spotify.Limit(50),
 	)
@@ -327,8 +164,7 @@ func (self *SpotifyApp) list_playlists(user string) map[string]spotify.SimplePla
 
 	for {
 		for _, p := range pl.Playlists {
-			ret[p.Name] = p
-			//println(p.Name, p.Owner.ID)
+			ret = append(ret, SimplePl2Collection(p))
 		}
 
 		if pl.Next == "" {
@@ -337,14 +173,25 @@ func (self *SpotifyApp) list_playlists(user string) map[string]spotify.SimplePla
 
 		err = self.client.NextPage(context.Background(), pl)
 		if err != nil {
-			fmt.Printf("SPOTIFY: err getting next page of album tracks, %v\n", err)
+			fmt.Printf("SPOTIFY: err getting next page of user playlists, %v\n", err)
 			break
 		}
 	}
 	return ret
 }
 
-func (self *SpotifyApp) create_playlist(name string) string {
+func (self *SpotifyApp) find_discover(name string) string {
+	self.ready.Wait()
+
+	for _, playlist := range self.list_playlists(name) {
+		if playlist.Owner == "spotify" && playlist.Name == "Discover Weekly" {
+			return string(playlist.ID) //probably breaks if users link have saved someone elses discover weekly
+		}
+	}
+	return ""
+}
+
+func (self *SpotifyApp) Create_Playlist(name string) string {
 	pl, err := self.client.CreatePlaylistForUser(context.Background(), self.userid, name, "GoonTunes", true, false)
 	if err != nil {
 		fmt.Printf("SPOTIFY: Failed to get create playlist %s, %v\n", name, err)
@@ -354,19 +201,62 @@ func (self *SpotifyApp) create_playlist(name string) string {
 	return pl.ID.String()
 }
 
-/*
-Below here are the the functions called by plumber
-*/
+func (self *SpotifyApp) Fetch_Playlist(ID string) *Collection {
+	self.ready.Wait()
+	if ID == "" {
+		return nil
+	}
 
-func (self *SpotifyApp) find_discover(name string) string {
+	fields := spotify.Fields("name,snapshot_id,tracks(total),id,owner(id)")
+	pl, err := self.client.GetPlaylist(context.Background(), spotify.ID(ID), fields)
+	if err != nil {
+		fmt.Printf("SPOTIFY: Failed to get playlist %s metadata, %v\n", ID, err)
+		return nil
+	}
+	//fmt.Printf("SPOTIFY: got playlist %s metadata\n", pl.ID) its too much
+	var c = SimplePl2Collection(pl.SimplePlaylist)
+	return &c
+}
+
+func (self *SpotifyApp) Fetch_Playlist_Tracks(c Collection) *Collection {
 	self.ready.Wait()
 
-	for _, playlist := range self.list_playlists(name) {
-		if playlist.Owner.ID == "spotify" && playlist.Name == "Discover Weekly" {
-			return string(playlist.ID) //probably breaks if users link have saved someone elses discover weekly
+	//NOTE: we are repeating work here done by the Fetch_Playlist calls
+	fields := spotify.Fields("name,snapshot_id,tracks(href,limit,next,offset,previous,total,items(track(id))),id,owner(id)") //100 tracks per request, better than 50
+	pl, err := self.client.GetPlaylist(context.Background(), spotify.ID(c.ID), fields)
+	if err != nil {
+		fmt.Printf("SPOTIFY: Failed to get playlist %s metadata, %v\n", c.ID, err)
+		return nil
+	}
+
+	trackids := make([]string, 0, pl.Tracks.Total+2)
+
+	for {
+		for _, track := range pl.Tracks.Tracks {
+			//index := i + pl.Tracks.Offset
+			if track.Track.ID.String() == "" {
+				fmt.Printf("SPOTIFY: bad playlist tracklist\n")
+				return nil
+			}
+			trackids = append(trackids, track.Track.ID.String())
+		}
+
+		if pl.Tracks.Next == "" {
+			break
+		}
+
+		err := self.client.NextPage(context.Background(), &pl.Tracks)
+		if err != nil {
+			fmt.Printf("SPOTIFY: err getting next page of playlist tracks, %v\n", err)
+			return nil
 		}
 	}
-	return ""
+
+	fmt.Printf("SPOTIFY: got playlist %s with %d tracks\n", pl.ID, len(trackids))
+
+	c = SimplePl2Collection(pl.SimplePlaylist)
+	c.TracksIDs = trackids
+	return &c
 }
 
 func (self *SpotifyApp) fetch_tracks_info(Ids []string) map[string]*SpotifyInfo {
@@ -466,63 +356,4 @@ func (self *SpotifyApp) fetch_album_tracks(Ids []string) []Collection {
 	util.Batched(foo, Ids, 20, false)
 	fmt.Printf("SPOTIFY: got tracks for %d albums\n", len(Ids))
 	return ret
-}
-
-func (self *SpotifyApp) fetch_playlist(ID string) *spotify.FullPlaylist {
-	self.ready.Wait()
-	if ID == "" {
-		return nil
-	}
-
-	//fields := spotify.Fields("name,snapshot_id,tracks(href,limit,next,offset,previous,total,items(track(id))),id,owner(id)") //100 tracks per request, better than 50
-	pl, err := self.client.GetPlaylist(context.Background(), spotify.ID(ID)) //fields)
-	if err != nil {
-		fmt.Printf("SPOTIFY: Failed to get playlist %s metadata, %v\n", ID, err)
-		return nil
-	}
-	//fmt.Printf("SPOTIFY: got playlist %s metadata\n", pl.ID) its too much
-	return pl
-}
-
-func (self *SpotifyApp) fetch_playlist_tracks(pl *spotify.FullPlaylist) *Collection {
-	self.ready.Wait()
-
-	if pl == nil {
-		return nil
-	}
-
-	size := pl.Tracks.Total
-	trackids := make([]string, 0, size)
-
-	for {
-		for _, track := range pl.Tracks.Tracks {
-			//index := i + pl.Tracks.Offset
-			if track.Track.ID.String() == "" {
-				fmt.Printf("SPOTIFY: bad playlist tracklist\n")
-				return nil
-			}
-			trackids = append(trackids, track.Track.ID.String())
-		}
-
-		if pl.Tracks.Next == "" {
-			break
-		}
-
-		err := self.client.NextPage(context.Background(), &pl.Tracks)
-		if err != nil {
-			fmt.Printf("SPOTIFY: err getting next page of playlist tracks, %v\n", err)
-			return nil
-		}
-	}
-
-	ret := Collection{
-		ID:        pl.ID.String(),
-		Rev:       pl.SnapshotID,
-		Service:   "spotify",
-		TracksIDs: trackids,
-		Name:      pl.Name,
-		Type:      "playlist",
-	}
-	fmt.Printf("SPOTIFY: got playlist %s with %d tracks\n", pl.ID, len(trackids))
-	return &ret
 }
