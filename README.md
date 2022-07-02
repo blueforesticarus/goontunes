@@ -21,6 +21,7 @@ Epic Features:
 5. run with ./goontunes or install the bob.service 
 
 ## TODO
+- better logging
 - enforce id semantics, retry on bad id
 - youtube playlist support
 - soundcloud playlist support

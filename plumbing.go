@@ -93,6 +93,17 @@ func new_Plumber() *Plumber {
 	p.j_save_em.Spinup(global.em.save, 10)
 	p.j_save_lib.Spinup(global.lib.save, 10)
 
+	if global.Discord != nil {
+		global.Discord.output.Add(&p.d_entry)
+	}
+	if global.Matrix != nil {
+		global.Matrix.output.Add(&p.d_entry)
+	}
+	if global.Spotify != nil {
+		global.Spotify.playlist_ready.Add(&p.j_playlist_task)
+		//This is actually a bad idea, playlist_ready is only a prereq for syncing a spotify playlist, not for computing the playlist, or syncing a youtube playlist, for example
+	}
+
 	util.Pin.Done()
 	return &p
 }
@@ -182,8 +193,8 @@ func batchSpotAlbums(_ids ...interface{}) {
 func singleSpotPlaylist(_collection ...interface{}) {
 	c := ToCollections(_collection...)[0]
 
-	pl := global.Spotify.fetch_playlist(c.ID)
-	if pl != nil && pl.SnapshotID == c.Rev {
+	pl := global.Spotify.Fetch_Playlist(c.ID)
+	if pl != nil && pl.Rev == c.Rev {
 		fmt.Printf("SPOTIFY: playlist %s has %d tracks (unchanged)\n", pl.ID, len(c.TracksIDs))
 		c.Date = time.Now()
 		global.plumber.d_collection.Plumb(c)
@@ -195,7 +206,7 @@ func singleSpotPlaylist(_collection ...interface{}) {
 		return
 	}
 
-	if pl.Owner.ID != "spotify" {
+	if pl.Owner != "spotify" {
 		c.Ignored = true
 		c.Name = pl.Name
 		c.Date = time.Now()
@@ -204,7 +215,7 @@ func singleSpotPlaylist(_collection ...interface{}) {
 		return
 	}
 
-	c2 := global.Spotify.fetch_playlist_tracks(pl)
+	c2 := global.Spotify.Fetch_Playlist_Tracks(*pl)
 
 	if c2 != nil {
 		c2.Date = time.Now()
@@ -289,7 +300,7 @@ func DoPlaylistTask() {
 
 		for _, sp := range global.Spotify.Playlists {
 			if sp.Sync == p.Name {
-				sp.Update(p)
+				sp.Update(&p)
 			}
 		}
 	}

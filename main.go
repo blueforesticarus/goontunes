@@ -15,9 +15,11 @@ var configfile = ".config"
 var helpurl = "https://github.com/blueforesticarus/goontunes"
 
 type State struct {
-	Discord   DiscordApp
-	Spotify   SpotifyApp // might not make sense to be list
-	Playlists []*Playlist
+	Discord   *DiscordApp
+	Spotify   *SpotifyApp
+	Youtube   *YoutubeApp
+	Matrix    *MatrixApp
+	Playlists []Playlist
 
 	CachePath string
 	em        *EntryManager
@@ -28,15 +30,36 @@ type State struct {
 	Manual map[string][]string
 }
 
+//Used by discord.go to know how far back to look for messages
+func (global *State) Latest(platform string, channel string) string {
+	global.em.Lock.RLock()
+	defer global.em.Lock.RUnlock()
+
+	latest := Entry{Valid: false, MessageId: ""}
+	for _, entry := range global.em.Entries {
+		if (platform == "" || platform == entry.Platform) &&
+			(channel == "" || channel == entry.ChannelId) {
+			if !latest.Valid || latest.Date.Before(entry.Date) {
+				latest = entry
+			}
+		}
+	}
+	return latest.MessageId
+}
+
 func process_manual() {
 	for k, v := range global.Manual {
 		for i, s := range v {
-			process_entry(Entry{
+			var entry = Entry{
 				MessageId: fmt.Sprintf("manual+%s+%d", k, i),
 				Platform:  "manual",
 				ChannelId: k,
 				Url:       s,
-			}, &global.plumber.d_entry)
+			}
+			process_entry(&entry)
+			if entry.Valid {
+				global.plumber.d_entry.Plumb(entry)
+			}
 		}
 	}
 }
@@ -81,10 +104,18 @@ func main() {
 
 	global.plumber = new_Plumber()
 
-	global.Discord.Init(&global.plumber.d_entry, global.em.Latest)
+	for _, app := range []App{
+		global.Spotify,
+		global.Youtube,
+		global.Discord,
+		global.Matrix,
+	} {
+		//XXX is this allowed? how do interfaces work?
+		if app != nil {
+			app.Connect()
+		}
+	}
 
-	go global.Spotify.connect()
-	go global.Discord.Connect()
 	go process_manual()
 
 	global.plumber.rescan() // no  reason not to do this concurrent with Discord init, I think
@@ -99,23 +130,4 @@ func main() {
 	exitSignal := make(chan os.Signal)
 	signal.Notify(exitSignal, syscall.SIGINT, syscall.SIGTERM)
 	<-exitSignal
-}
-
-// std lib devs are clowning
-func contains_a_fucking_string(s []string, str string) bool {
-	for _, v := range s {
-		if v == str {
-			return true
-		}
-	}
-
-	return false
-}
-func fucking_index(slice []string, item string) int {
-	for i := range slice {
-		if slice[i] == item {
-			return i
-		}
-	}
-	return -1
 }

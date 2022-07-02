@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"sync"
+	"net/url"
+	"regexp"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -31,6 +33,45 @@ func SimplePl2Collection(pl spotify.SimplePlaylist) Collection {
 	}
 }
 
+//used to find spotify links, see discord.py
+func try_spotify(entry *Entry) {
+	u, err := url.Parse(entry.Url)
+	if err != nil {
+		println("invalid url")
+		return
+	}
+	if strings.Contains(u.Host, "spotify") {
+		entry.Service = "spotify"
+
+		entry.Valid = true
+		if strings.Contains(entry.Url, "album") {
+			entry.Type = "album"
+			entry.IsTrack = false
+		} else if strings.Contains(entry.Url, "track") {
+			entry.Type = "track"
+			entry.IsTrack = true
+		} else if strings.Contains(entry.Url, "user") {
+			entry.Type = "user"
+			entry.IsTrack = false
+		} else if strings.Contains(entry.Url, "playlist") {
+			entry.Type = "playlist"
+			entry.IsTrack = false
+		} else {
+			entry.Valid = false
+			return
+		}
+
+		re := regexp.MustCompile("/" + entry.Type + "/([0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]+)")
+		ms := re.FindStringSubmatch(u.Path)
+		if len(ms) == 2 {
+			entry.ID = ms[1]
+		} else {
+			entry.Valid = false
+		}
+	}
+
+}
+
 type SpotifyInfo = spotify.FullTrack
 type SpotifyExtraInfo = spotify.AudioFeatures
 
@@ -44,27 +85,33 @@ type SpotifyApp struct {
 	CacheToken bool
 
 	client *spotify.Client
-	ready  sync.WaitGroup
 	userid string
+
+	ready          util.OutputsNeedInit
+	playlist_ready util.OutputsNeedInit
 }
 
 func (self *SpotifyApp) Name() string {
 	return "spotify"
 }
 
-func (self *SpotifyApp) connect() {
-	global.plumber.j_playlist_task.Set(1)
-
-	self.ready.Add(1)
+func (self *SpotifyApp) Connect() {
 	if self.ClientID == "" || self.ClientID == "<yours>" {
-		log.Fatalf("DISCORD: Generate a client id and secret following the instructions here: %s\n", helpurl)
+		log.Fatalf("SPOTIFY: Generate a client id and secret following the instructions here: %s\n", helpurl)
 	}
 
 	var tokenfile string
 	if self.CacheToken {
+		//NOTE: this is the last remaining "global" in this file :(
+		//... not actually a bad use for a global
 		tokenfile = global.CachePath + "/spotify.token"
 	}
-	self.client = self.Authenticate(tokenfile) //see spotifyauth.go
+
+	oauth_client := Authenticate(tokenfile, self.AuthConfig()) //see spotifyauth.go
+	self.client = spotify.New(
+		oauth_client,
+		spotify.WithRetry(true),
+	)
 
 	// use the client, test if it is working
 	user, err := self.client.CurrentUser(context.Background())
@@ -75,13 +122,13 @@ func (self *SpotifyApp) connect() {
 	fmt.Println("SPOTIFY: You are logged in as:", user.ID)
 	self.userid = user.ID
 
-	self.ready.Done()
+	self.ready.Init(0)
 
 	for _, p := range self.Playlists {
 		p.Init(self)
 	}
 
-	global.plumber.j_playlist_task.Set(-1)
+	self.playlist_ready.Init(0)
 }
 
 func (self *SpotifyApp) Get_Track_Id(track *Track) string {
@@ -100,7 +147,7 @@ func (self *SpotifyApp) Playlist_InsertTracks(ID string, ins_list []Pl_Ins) int 
 	var position = 0
 	var total = 0
 	bar := func(o int, idss []string) {
-		_, err := global.Spotify.client.AddTracksToPlaylistOpt(
+		_, err := self.client.AddTracksToPlaylistOpt(
 			context.Background(), spotify.ID(ID), position+o, fuckshit(idss)...,
 		)
 		if err != nil {
@@ -128,7 +175,7 @@ func (self *SpotifyApp) Playlist_DeleteTracks(ID string, rm_list []Pl_Rm) int {
 			spot_rml[i] = spotify.NewTrackToRemove(v.id, []int{v.i})
 		}
 
-		_, err := global.Spotify.client.RemoveTracksFromPlaylistOpt(
+		_, err := self.client.RemoveTracksFromPlaylistOpt(
 			context.Background(), spotify.ID(ID), spot_rml, "",
 		)
 		if err != nil {

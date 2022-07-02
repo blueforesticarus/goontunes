@@ -64,3 +64,27 @@ func (self *InOut) Poll() (interface{}, bool) {
 		}
 	}
 }
+
+type Pipe struct {
+	Block
+	list []Input
+}
+
+func (self *Pipe) Add(v Input) {
+	self.list = append(self.list, v)
+}
+
+func (self *Pipe) Plumb(values ...interface{}) {
+	for _, v := range self.list {
+		v.Plumb(values...)
+	}
+}
+
+// copied from Outputs, probably could reuse code better
+func (self *Pipe) Set(n int) {
+	self.Block.Set(n)
+
+	for _, v := range self.list {
+		v.Set(n)
+	}
+}

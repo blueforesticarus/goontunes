@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 
+	"github.com/blueforesticarus/goontunes/util"
 	"github.com/lytics/base62"
 	"github.com/pmezard/go-difflib/difflib"
 )
@@ -108,15 +109,16 @@ type ServicePlaylist struct {
 	ID   string
 	Name string
 
-	Sync     string //the internal playlist to sync to
-	NoDelete bool
+	Sync       string //the internal playlist to sync to
+	NoDelete   bool
+	NoCrossRef bool
 
 	ignore  bool
 	service PlaylistService
 	cache   *Collection
 }
 
-func (self *ServicePlaylist) Scan() error {
+func (self *ServicePlaylist) scan() error {
 	if self.ID == "" {
 		return fmt.Errorf("Playlist %s has no known ID", self.Name)
 	}
@@ -139,7 +141,7 @@ func (self *ServicePlaylist) Scan() error {
 	return nil
 }
 
-func (self *ServicePlaylist) Check(target []string) error {
+func (self *ServicePlaylist) check(target []string) error {
 	if self.cache == nil || len(self.cache.TracksIDs) != len(target) {
 		return fmt.Errorf("error detected in playlist update\n")
 	}
@@ -156,7 +158,7 @@ func (self *ServicePlaylist) Update(p *Playlist) error {
 	fmt.Printf("Begin sync of %s <-> %s\n", self.ID, p.Name)
 
 	//assume p is correct playlist, and p.rebuild called
-	err := self.Scan()
+	err := self.scan()
 	if err != nil {
 		return fmt.Errorf("Abort playlist update. %v \n", err)
 	}
@@ -172,7 +174,7 @@ func (self *ServicePlaylist) Update(p *Playlist) error {
 
 	//get just the strings, filter things missing spot info
 	target := make([]string, 0, len(p.tracks))
-	for _, v := range p.tracks {
+	for i, v := range p.tracks {
 		if v == nil || v.IDMaps == nil {
 			//bug
 			return fmt.Errorf("Abort playlist sync, error with track")
@@ -183,15 +185,25 @@ func (self *ServicePlaylist) Update(p *Playlist) error {
 			//no id for this track on this service
 			continue
 		}
-
-		if self.NoDelete && contains_a_fucking_string(current, id) {
-			// we skip duplicates for nodelete, kinda have to
-			continue
+		if self.NoCrossRef {
+			panic("unimplemented")
+			//NOTE: not sure clean way to add this functionality
+			//if the id from the entry is not the same, then it is a cross referenced track
 		}
+
+		if self.NoDelete {
+			if util.Contains_a_fucking_string(target, id) ||
+				util.Contains_a_fucking_string(current, id) {
+				// we skip duplicates for nodelete, kinda have to
+				continue
+			}
+		}
+		target[i] = id
 	}
 
 	if self.NoDelete {
 		//for nodelete we target the playlist plus current
+		//NOTE: this is prepending, new stuff will be at the top
 		target = append(target, current...)
 	}
 
@@ -239,13 +251,13 @@ func (self *ServicePlaylist) Update(p *Playlist) error {
 		}
 	}
 
-	err = self.Scan()
+	err = self.scan()
 	if err == nil {
-		err = self.Check(target)
+		err = self.check(target)
 	}
 	return err
 }
 
-//TODO create files of links as a playlist output
 type FileOutput struct {
+	ServicePlaylist
 }

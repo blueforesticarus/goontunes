@@ -1,0 +1,8 @@
+.cache/
+.config
+.config.new
+.vscode/
+client_secret.json
+entries_save
+go.sum
+goontunes

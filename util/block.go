@@ -30,16 +30,6 @@ func (self *Block) Init() {
 	self.event.L = &self.lock
 }
 
-/*
-func (self *Block) Open() {
-	self.Add(1)
-}
-
-func (self *Block) Close() {
-	self.Add(-1)
-}
-*/
-
 func (self *Block) Set(n int) {
 	self.lock.Lock()
 	if n >= 0 {
@@ -72,4 +62,21 @@ func (self *Block) Wait() int {
 	}
 	self.lock.Unlock()
 	return int(i)
+}
+
+/* maybe remove, not sure it makes code easier to understand */
+func (b *Block) Open() {
+	b.Set(1)
+}
+
+func (b *Block) Close() {
+	b.Set(-1)
+}
+
+func Open(b Blockable) {
+	b.Set(1)
+}
+
+func Close(b Blockable) {
+	b.Set(-1)
 }

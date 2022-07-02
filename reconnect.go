@@ -1,23 +1,24 @@
 package main
 
+/* unfinished refactor of connect logic*/
+
 import "github.com/blueforesticarus/goontunes/util"
 
-type API interface {
+type App interface {
 	Connect()
 }
 
 //URL Sources
 type Latest = func(string, string) string
 type Platform interface {
-	API
+	App
 	Fetch_Messages(bool)
 	Init(util.Input, Latest)
 }
 
 //Playlist Output
-type Service interface {
-	API
-	Update_Playlist(Playlist)
+type ServiceApp interface {
+	App
 }
 
 //I have no idea how to implement automatic reconnect

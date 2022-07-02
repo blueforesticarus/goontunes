@@ -13,8 +13,9 @@ import (
 	"regexp"
 	"runtime"
 
-	"github.com/zmb3/spotify/v2"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	"google.golang.org/api/youtube/v3"
 )
 
 /*
@@ -48,6 +49,15 @@ func (app *SpotifyApp) AuthConfig() *oauth2.Config {
 		"user-library-read",
 	)
 	return cfg
+}
+
+func (app *YoutubeApp) AuthConfig() *oauth2.Config {
+	config, err := google.ConfigFromJSON([]byte(app.Auth), youtube.YoutubeScope)
+	if err != nil {
+		//TODO
+		return nil
+	}
+	return config
 }
 
 func WriteToken(cachefile string, token *oauth2.Token) {
@@ -92,9 +102,8 @@ func (self CachedTokenSource) Token() (*oauth2.Token, error) {
 	return tok, nil
 }
 
-func (app *SpotifyApp) Authenticate(cachefile string) *spotify.Client {
+func Authenticate(cachefile string, config *oauth2.Config) *http.Client {
 	var ctx = contextWithHTTPClient(context.Background()) //no clue about this one
-	var config = app.AuthConfig()
 
 	tokensource := func(token *oauth2.Token) oauth2.TokenSource {
 		var src CachedTokenSource
@@ -124,13 +133,7 @@ func (app *SpotifyApp) Authenticate(cachefile string) *spotify.Client {
 		fmt.Printf("spotify using cached token\n")
 	}
 
-	// use the token to get an authenticated client
-	client := spotify.New(
-		oauth2.NewClient(ctx, src),
-		spotify.WithRetry(true),
-	)
-
-	return client
+	return oauth2.NewClient(ctx, src)
 }
 
 // EAS: no idea what this does

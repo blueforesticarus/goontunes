@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/blueforesticarus/goontunes/util"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -105,23 +106,6 @@ func (self *EntryManager) load() {
 	}
 }
 
-//Used by discord.go to know how far back to look for messages
-func (em *EntryManager) Latest(platform string, channel string) string {
-	em.Lock.RLock()
-	defer em.Lock.RUnlock()
-
-	latest := Entry{Valid: false, MessageId: ""}
-	for _, entry := range em.Entries {
-		if (platform == "" || platform == entry.Platform) &&
-			(channel == "" || channel == entry.ChannelId) {
-			if !latest.Valid || latest.Date.Before(entry.Date) {
-				latest = entry
-			}
-		}
-	}
-	return latest.MessageId
-}
-
 type Library struct {
 	Tracks      []*Track //can contain nill if track removed
 	Collections map[string]*Collection
@@ -185,7 +169,7 @@ func (self *Library) getTrack(id string) *Track {
 	if ok {
 		track := self.Tracks[index]
 		if track != nil {
-			if !contains_a_fucking_string(track.IDs, id) {
+			if !util.Contains_a_fucking_string(track.IDs, id) {
 				panic("uh oh")
 			}
 			self.Lock.RUnlock()
@@ -194,7 +178,7 @@ func (self *Library) getTrack(id string) *Track {
 	}
 
 	for index, track := range self.Tracks {
-		if contains_a_fucking_string(track.IDs, id) {
+		if util.Contains_a_fucking_string(track.IDs, id) {
 			self.Lock.RUnlock()
 			self.Lock.Lock()
 			self._track_map[id] = index
@@ -380,12 +364,12 @@ func (t1 *Track) Merge(t2 Track) {
 	}
 
 	for _, t2_id := range t2.IDs {
-		if !contains_a_fucking_string(t1.IDs, t2_id) {
+		if !util.Contains_a_fucking_string(t1.IDs, t2_id) {
 			t1.IDs = append(t1.IDs, t2_id)
 		}
 	}
 	for t2_service, t2_ii := range t2.IDMaps {
-		ii := fucking_index(t1.IDs, t2.IDs[t2_ii])
+		ii := util.Fucking_index(t1.IDs, t2.IDs[t2_ii])
 		if ii == -1 {
 			panic("barg")
 		}
@@ -519,7 +503,7 @@ func (self *Playlist) Rebuild() bool {
 	accept := func(entry *Entry) bool {
 		//channel matching
 		if len(self.Channels) != 0 {
-			if !contains_a_fucking_string(self.Channels, entry.ChannelId) {
+			if !util.Contains_a_fucking_string(self.Channels, entry.ChannelId) {
 				return false
 			}
 		}

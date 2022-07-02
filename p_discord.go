@@ -3,10 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
-	"net/url"
-	"regexp"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -35,16 +32,10 @@ type DiscordApp struct {
 	Channels []string
 	dg       *discordgo.Session
 
-	output util.Input
-	latest Latest
+	output util.Pipe
 }
 
 var rxRelaxed = xurls.Relaxed() //precompile
-
-func (self *DiscordApp) Init(o util.Input, l Latest) {
-	self.output = o
-	self.latest = l
-}
 
 ///XXX reconnect
 func (self *DiscordApp) Connect() {
@@ -106,7 +97,7 @@ func (self *DiscordApp) on_message(s *discordgo.Session, m *discordgo.MessageCre
 		return
 	}
 
-	if !contains_a_fucking_string(self.Channels, m.ChannelID) {
+	if !util.Contains_a_fucking_string(self.Channels, m.ChannelID) {
 		return
 	}
 
@@ -161,7 +152,7 @@ func (self *DiscordApp) fetch_messages_all(use_cache bool) {
 	for _, cid := range self.Channels {
 		if cid != "" {
 			if use_cache {
-				start = self.latest("discord", cid)
+				start = global.Latest("discord", cid)
 			} else {
 				start = ""
 			}
@@ -229,104 +220,22 @@ func (self *DiscordApp) process_message(message *discordgo.Message) {
 
 		entry := template
 		entry.Url = s
-		process_entry(entry, self.output)
+		process_entry(&entry)
+
+		if entry.Valid {
+			self.output.Plumb(entry)
+		}
 	}
 }
 
-func process_entry(entry Entry, output util.Input) {
-	try_spotify(&entry)
+/* This could argueably be moved to a seperate file since it is used by p_element */
+func process_entry(entry *Entry) {
+	try_spotify(entry)
 	if !entry.Valid {
-		try_youtube(&entry)
+		try_youtube(entry)
 	}
 	if !entry.Valid {
-		try_soundcloud(&entry)
+		try_soundcloud(entry)
 	}
-
-	if entry.Valid {
-		output.Plumb(entry)
-	}
-}
-
-func try_spotify(entry *Entry) {
-	u, err := url.Parse(entry.Url)
-	if err != nil {
-		println("invalid url")
-		return
-	}
-	if strings.Contains(u.Host, "spotify") {
-		entry.Service = "spotify"
-
-		entry.Valid = true
-		if strings.Contains(entry.Url, "album") {
-			entry.Type = "album"
-			entry.IsTrack = false
-		} else if strings.Contains(entry.Url, "track") {
-			entry.Type = "track"
-			entry.IsTrack = true
-		} else if strings.Contains(entry.Url, "user") {
-			entry.Type = "user"
-			entry.IsTrack = false
-		} else if strings.Contains(entry.Url, "playlist") {
-			entry.Type = "playlist"
-			entry.IsTrack = false
-		} else {
-			entry.Valid = false
-			return
-		}
-
-		re := regexp.MustCompile("/" + entry.Type + "/([0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]+)")
-		ms := re.FindStringSubmatch(u.Path)
-		if len(ms) == 2 {
-			entry.ID = ms[1]
-		} else {
-			entry.Valid = false
-		}
-	}
-
-}
-
-/*
-TODO unit test
-https://www.youtube.com/watch?v=0zM3nApSvMg&feature=feedrec_grec_index
-https://www.youtube.com/user/IngridMichaelsonVEVO#p/a/u/1/QdK8U-VIH_o
-https://www.youtube.com/v/0zM3nApSvMg?fs=1&amp;hl=en_US&amp;rel=0
-https://www.youtube.com/watch?v=0zM3nApSvMg#t=0m10s
-https://www.youtube.com/embed/0zM3nApSvMg?rel=0
-https://www.youtube.com/watch?v=0zM3nApSvMg
-https://youtu.be/0zM3nApSvMg
-*/
-
-func try_youtube(entry *Entry) {
-	u, err := url.Parse(entry.Url)
-	if err != nil {
-		println("invalid url")
-		return
-	}
-	if strings.Contains(u.Host, "youtube") || strings.Contains(u.Host, "youtu.be") {
-		entry.Service = "youtube"
-		re := regexp.MustCompile(`(?:[?&]v=|\/embed\/|\/1\/|\/v\/|https:\/\/(?:www\.)?youtu\.be\/)([^&\n?#]+)`)
-		ms := re.FindStringSubmatch(entry.Url)
-		if len(ms) == 2 {
-			entry.ID = ms[1]
-			entry.Valid = true
-			entry.IsTrack = true
-		} else {
-			entry.Valid = false
-		}
-	}
-}
-
-func try_soundcloud(entry *Entry) {
-	u, err := url.Parse(entry.Url)
-	if err != nil {
-		println("invalid url")
-		return
-	}
-
-	if strings.Contains(u.Host, "soundcloud") {
-		entry.Service = "soundcloud"
-		entry.IsTrack = true
-		entry.ID = u.Path //XXX RawPath?
-		entry.Valid = true
-	}
+	//TODO support apple music, apparently people actually use apple music in some countries
 }
