@@ -2,8 +2,8 @@
 Description=Bob the Playlist Builder
 
 [Service]
-ExecStart=bash -c './goontunes'
-WorkingDirectory=/home/files/projects/dev/prototype/goontunes
+ExecStart=/home/user/var/install/goontunes-beta/goontunes
+WorkingDirectory=/home/user/var/install/goontunes-beta
 Restart=always
 RestartSec=5m 
 RuntimeMaxSec=8h
