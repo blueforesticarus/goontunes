@@ -261,11 +261,9 @@ func (self *ServicePlaylist) Update(p *Playlist) error {
 	}
 
 	//Description
-	if err == nil {
-		now := time.Now()
-		desc := fmt.Sprintf("%s (Updated: %s)", p.Description, now.Format(time.UnixDate))
-		err = self.service.Playlist_Description(self.ID, desc)
-	}
+	now := time.Now()
+	desc := fmt.Sprintf("%s (Updated: %s)", p.Description, now.Format(time.UnixDate))
+	self.service.Playlist_Description(self.ID, desc)
 
 	return err
 }
