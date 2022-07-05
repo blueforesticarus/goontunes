@@ -6,6 +6,7 @@ import "github.com/blueforesticarus/goontunes/util"
 
 type App interface {
 	Connect()
+	IsNil() bool
 }
 
 //URL Sources

@@ -37,6 +37,10 @@ type DiscordApp struct {
 
 var rxRelaxed = xurls.Relaxed() //precompile
 
+func (self *DiscordApp) IsNil() bool {
+	return self == nil
+}
+
 ///XXX reconnect
 func (self *DiscordApp) Connect() {
 	// Create a new Discord session using the provided bot token.
@@ -185,8 +189,8 @@ func (self *DiscordApp) fetch_messages(start string, ch string) {
 	}
 
 	if len(ms) > 0 {
-		a, _ := ms[0].Timestamp.Parse()
-		b, _ := ms[len(ms)-1].Timestamp.Parse()
+		a := ms[0].Timestamp
+		b := ms[len(ms)-1].Timestamp
 		fmt.Printf("DISCORD: %s fetched chunk %s - %s\n", ch, st, a.Format("2006-01-02"))
 
 		if len(ms) >= MaxMessage {
@@ -204,7 +208,7 @@ func (self *DiscordApp) process_message(message *discordgo.Message) {
 		return
 	}
 
-	ts, _ := message.Timestamp.Parse()
+	ts := message.Timestamp
 
 	template := Entry{
 		Platform:   "discord",

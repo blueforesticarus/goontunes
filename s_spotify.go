@@ -25,6 +25,7 @@ func SimplePl2Collection(pl spotify.SimplePlaylist) Collection {
 	return Collection{
 		Name:  pl.Name,
 		ID:    pl.ID.String(),
+		Service: "spotify",
 		Owner: pl.Owner.ID,
 		Rev:   pl.SnapshotID,
 		Type:  "Playlist",
@@ -89,6 +90,10 @@ type SpotifyApp struct {
 
 	ready          util.OutputsNeedInit
 	playlist_ready util.OutputsNeedInit
+}
+
+func (self *SpotifyApp) IsNil() bool {
+	return self == nil
 }
 
 func (self *SpotifyApp) Name() string {
@@ -188,6 +193,11 @@ func (self *SpotifyApp) Playlist_DeleteTracks(ID string, rm_list []Pl_Rm) int {
 	util.BatchedRange(foo, len(rm_list), 100)
 
 	return total
+}
+
+func (self *SpotifyApp) Playlist_Description(ID string, desc string) error {
+	err := self.client.ChangePlaylistDescription(context.Background(), spotify.ID(ID), desc)
+	return err
 }
 
 func (self *SpotifyApp) List_Playlists() []Collection {

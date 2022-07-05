@@ -491,6 +491,8 @@ type Playlist struct {
 
 	Contributors []string
 
+	Description string
+
 	tracks       []*Track
 	last_rebuild time.Time
 }

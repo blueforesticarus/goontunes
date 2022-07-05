@@ -111,7 +111,7 @@ func main() {
 		global.Matrix,
 	} {
 		//XXX is this allowed? how do interfaces work?
-		if app != nil {
+		if ! app.IsNil() {
 			app.Connect()
 		}
 	}

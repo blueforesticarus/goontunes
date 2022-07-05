@@ -6,7 +6,8 @@ import (
 	"io/ioutil"
 	"os"
 	"sort"
-
+	"time"
+	
 	"github.com/blueforesticarus/goontunes/util"
 	"github.com/lytics/base62"
 	"github.com/pmezard/go-difflib/difflib"
@@ -29,6 +30,7 @@ type PlaylistService interface {
 	Get_Track_Id(*Track) string
 	Playlist_InsertTracks(string, []Pl_Ins) int
 	Playlist_DeleteTracks(string, []Pl_Rm) int
+	Playlist_Description(string, string) error
 	Create_Playlist(string) string
 	List_Playlists() []Collection
 }
@@ -116,6 +118,8 @@ type ServicePlaylist struct {
 	ignore  bool
 	service PlaylistService
 	cache   *Collection
+
+	description string
 }
 
 func (self *ServicePlaylist) scan() error {
@@ -174,14 +178,14 @@ func (self *ServicePlaylist) Update(p *Playlist) error {
 
 	//get just the strings, filter things missing spot info
 	target := make([]string, 0, len(p.tracks))
-	for i, v := range p.tracks {
+	for _, v := range p.tracks {
 		if v == nil || v.IDMaps == nil {
 			//bug
 			return fmt.Errorf("Abort playlist sync, error with track")
 		}
 
 		id := self.service.Get_Track_Id(v)
-		if id != "" {
+		if id == "" {
 			//no id for this track on this service
 			continue
 		}
@@ -198,7 +202,7 @@ func (self *ServicePlaylist) Update(p *Playlist) error {
 				continue
 			}
 		}
-		target[i] = id
+		target = append(target, id)
 	}
 
 	if self.NoDelete {
@@ -255,6 +259,14 @@ func (self *ServicePlaylist) Update(p *Playlist) error {
 	if err == nil {
 		err = self.check(target)
 	}
+
+	//Description
+	if err == nil {
+		now := time.Now()
+		desc := fmt.Sprintf("%s (Updated: %s)", p.Description, now.Format(time.UnixDate))
+		err = self.service.Playlist_Description(self.ID, desc)
+	}
+
 	return err
 }
 

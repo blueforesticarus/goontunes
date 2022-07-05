@@ -56,6 +56,10 @@ type YoutubeApp struct {
 	ready util.OutputsNeedInit
 }
 
+func (self *YoutubeApp) IsNil() bool {
+	return self == nil
+}
+
 func (self *YoutubeApp) Connect() {
 	if self.Auth == "" || self.Auth == "<yours>" {
 		log.Fatalf("YOUTUBE: Generate a client id and secret following the instructions here: %s\n", helpurl)

@@ -13,7 +13,12 @@ type MatrixApp struct {
 	output util.Pipe
 }
 
+func (self *MatrixApp) IsNil() bool {
+	return self == nil
+}
+
 ///XXX reconnect
 func (self *MatrixApp) Connect() {
 	//TODO
 }
+
