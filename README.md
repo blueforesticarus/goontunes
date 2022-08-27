@@ -1,4 +1,7 @@
 # GoonTunes
+This is being rewriten in Rust.
+Turns out Go is bad.
+
 ### spotify playlists for the you and your goons
 
 Epic Features:
@@ -34,4 +37,4 @@ Epic Features:
 - *secret feature*
 
 - rewrite with database
-- rewrite with elixir
+- rewrite with ~~elixir~~ we dont speak of that language anymore
