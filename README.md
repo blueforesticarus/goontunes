@@ -1,5 +1,5 @@
 # GoonTunes
-This is being rewriten in [Rust](https://github.com/blueforesticarus/goontunes2).
+This is being [rewriten](https://github.com/blueforesticarus/goontunes2) in Rust.
 Turns out Go is bad.
 
 ### spotify playlists for the you and your goons
