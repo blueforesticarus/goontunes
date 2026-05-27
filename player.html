@@ -1,0 +1,1285 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Goontunes</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            background: #000;
+            overflow: hidden;
+            font-family: monospace
+        }
+
+        #ui {
+            position: fixed;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: #04030a;
+            color: #cce;
+            z-index: 20
+        }
+
+        #ui h1 {
+            font-size: 1.5em;
+            color: #0cf;
+            letter-spacing: 4px;
+            margin-bottom: 20px
+        }
+
+        #ui p {
+            color: #556;
+            font-size: .85em;
+            margin: 5px 0;
+            max-width: 380px;
+            text-align: center
+        }
+
+        #login-btn {
+            margin-top: 22px;
+            padding: 11px 30px;
+            background: #1db954;
+            color: #000;
+            border: none;
+            border-radius: 22px;
+            font-size: 1em;
+            font-weight: bold;
+            cursor: pointer
+        }
+
+        #login-btn:hover {
+            background: #1ed760
+        }
+
+        #st {
+            margin-top: 14px;
+            font-size: .78em;
+            color: #445;
+            min-height: 1.2em
+        }
+
+        #hud {
+            position: fixed;
+            top: 16px;
+            left: 16px;
+            z-index: 10;
+            pointer-events: none;
+            background: rgba(0, 0, 0, .55);
+            border-radius: 8px;
+            padding: 10px 16px;
+            min-width: 220px;
+            display: none
+        }
+
+        #hud .track {
+            font-size: .95em;
+            color: #ddf;
+            font-weight: bold;
+            margin-bottom: 2px
+        }
+
+        #hud .artist {
+            font-size: .78em;
+            color: #89a;
+            margin-bottom: 4px
+        }
+
+        #hud .stats {
+            font-size: .72em;
+            color: #556
+        }
+
+        #prog {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            background: rgba(255, 255, 255, .08);
+            z-index: 10
+        }
+
+        #prog-fill {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #0cf, #f0f)
+        }
+
+        #mute-banner {
+            position: fixed;
+            bottom: 14px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 20;
+            background: rgba(0, 0, 0, .75);
+            color: #0cf;
+            font-family: monospace;
+            font-size: .82em;
+            padding: 7px 20px;
+            border-radius: 20px;
+            border: 1px solid #0cf4;
+            pointer-events: none;
+            display: none;
+            letter-spacing: 1px;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="ui">
+        <h1>&#9834; GOONTUNES</h1>
+        <p>3D Rainbow Road visualizer &mdash; Spotify Web Playback SDK</p>
+        <p>Requires Spotify Premium.</p>
+        <button id="login-btn">Connect Spotify</button>
+        <p id="st"></p>
+    </div>
+    <div id="hud">
+        <div class="track" id="h-track">&#8212;</div>
+        <div class="artist" id="h-artist"></div>
+        <div class="stats" id="h-stats"></div>
+    </div>
+    <div id="prog">
+        <div id="prog-fill"></div>
+    </div>
+    <div id="mute-banner">&#128263; tap anywhere to unmute</div>
+
+    <script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js"}}
+</script>
+    <script use_strict type="module">
+        import * as THREE from 'three';
+
+        // =========================================================================
+        // §1  UTILS  -- pure helpers, no dependencies, safe to use anywhere
+        // =========================================================================
+
+        function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
+        // World-up axis -- treated as immutable throughout.
+        const WY = new THREE.Vector3(0, 1, 0);
+
+        // Compute a right/up frame from a unit tangent + a roll angle (radians).
+        // This is the SINGLE implementation used by both ribbon mesh building (§6)
+        // and pose lookup (§6). They must always call this so the frames agree.
+        function frameFromTangRoll(tang, roll) {
+            let right = new THREE.Vector3().crossVectors(tang, WY);
+            if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
+            right = right.normalize();
+            let up = new THREE.Vector3().crossVectors(right, tang).normalize();
+            if (roll !== 0) {
+                const q = new THREE.Quaternion().setFromAxisAngle(tang, roll);
+                right.applyQuaternion(q);
+                up.applyQuaternion(q);
+            }
+            return { right, up };
+        }
+
+        // =========================================================================
+        // §2  CONFIG  -- all tunable values in one place
+        // =========================================================================
+
+        const CONFIG = {
+            // -- Car / speed ------------------------------------------------------
+            CAR_SPEED: 130,    // units / second along track
+            CAR_OFFSET: 8,    // how far behind track-centre the car body sits
+            CAR_LIFT: 0.8,    // height above road surface (track-up units)
+
+            // -- Camera -----------------------------------------------------------
+            CAM_BACK: 18,    // pull-back from track-centre point
+            CAM_HEIGHT: 6,    // height above track-centre point
+            CAM_SIDE: 0.8,    // lateral offset (keeps car off dead-centre)
+            CAM_LOOKAT_AHEAD: 22,    // how far ahead the look-at point sits
+            CAM_LOOKAT_UP: 0.5,    // vertical bias of look-at point
+
+            // -- Beat notes -------------------------------------------------------
+            BEAT_LOOKAHEAD_S: 4,    // seconds ahead that a beat note is spawned
+            BEAT_BURST_DIST: 1,    // track-distance at which a note starts flashing
+            BEAT_BURST_AFTER: 0,    // seconds after hit that flash effects linger
+
+            BEAT_BURST_TARGET_LEAD: 0.05, // seconds to build up target highlight
+            BEAT_BURST_TARGET_LINGER: 0.1, // seconds to linger highlight after hit
+
+            // -- Track / curve generation -----------------------------------------
+            SEG_KNOTS: 6,    // Bezier sub-curves per segment
+            KNOT_LEN: 120,    // arc-length of one Bezier knot (units)
+            SEG_SUBS: 50,    // mesh subdivisions per knot
+            ARC_DIV: 200,    // arc-length samples for getUtoTmapping
+
+            YAW_MAX: 0.85,    // max yaw change per knot (radians)
+            PITCH_MAX: 0.55,    // max pitch change per knot (radians)
+            ROLL_ACCEL: 0.55,    // roll-rate perturbation per knot
+            ROLL_RATE_MAX: 0.9,    // hard clamp on accumulated roll rate
+            ROLL_SCALE: 0.65,    // fraction of roll rate applied each knot
+
+            // Applied at render time to convert accumulated roll into visible tilt.
+            // Used identically in ribbon mesh building AND getPoseAtDist().
+            // Both call frameFromTangRoll() so this is the single source of truth.
+            ROLL_VISUAL_SCALE: 0.55,
+
+            // -- Lane layout ------------------------------------------------------
+            TRACK_COUNT: 5,
+            TRACK_SPACE: 1.3,
+            LANE_COLORS: [0x00c8ff, 0xff3c44, 0x4cff6a, 0xffd32a, 0xb44cff],
+
+            // -- Bloom (CSS-filter glow) ------------------------------------------
+            BLOOM_STRENGTH: 4.5,    // brightness multiplier (0 = off)
+            BLOOM_RADIUS: 0.6,    // blur spread (lower = tighter halo)
+            BLOOM_THRESHOLD: 0.28,    // reserved -- used to gate emissive materials
+
+            // -- Track ribbon appearance ------------------------------------------
+            TRACK_EMISSIVE: 0.06,    // lane ribbon emissive intensity
+        };
+
+        // -- Derived constants -- computed once, never recalculated elsewhere -----
+        // BEAT_LOOKAHEAD is referenced by track seeding, beat spawn, and culling.
+        // All three must use this value so distances agree.
+        const BEAT_LOOKAHEAD = CONFIG.CAR_SPEED * CONFIG.BEAT_LOOKAHEAD_S;
+
+        // Per-lane lateral offset from track centre (index 0 = leftmost lane).
+        const LANE_CENTER_OFFSETS = Array.from({ length: CONFIG.TRACK_COUNT },
+            (_, i) => (i - (CONFIG.TRACK_COUNT - 1) / 2) * CONFIG.TRACK_SPACE);
+
+        // =========================================================================
+        // §3  AUTH  -- Spotify PKCE token management
+        //     Future: add Discord OAuth alongside Spotify (#6).
+        // =========================================================================
+
+        const SpotifyAuth = (() => {
+            const CLIENT_ID = "1d68b91899e746fcab809f446472e27f";
+            const REDIRECT = location.origin + location.pathname;
+            const SCOPES = "streaming user-read-email user-read-private " +
+                "user-read-currently-playing user-read-playback-state " +
+                "user-modify-playback-state";
+
+            const b64url = b => btoa(String.fromCharCode(...new Uint8Array(b)))
+                .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+            const randStr = n => {
+                const a = new Uint8Array(n); crypto.getRandomValues(a);
+                return b64url(a.buffer).slice(0, n);
+            };
+
+            async function startPKCE() {
+                const v = randStr(64);
+                const ch = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v)));
+                sessionStorage.setItem("pv", v);
+                location.href = "https://accounts.spotify.com/authorize?" + new URLSearchParams({
+                    client_id: CLIENT_ID, response_type: "code", redirect_uri: REDIRECT,
+                    scope: SCOPES, code_challenge_method: "S256", code_challenge: ch,
+                });
+            }
+
+            async function exchangeCode(code) {
+                const r = await fetch("https://accounts.spotify.com/api/token", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: new URLSearchParams({
+                        grant_type: "authorization_code", code,
+                        redirect_uri: REDIRECT, client_id: CLIENT_ID,
+                        code_verifier: sessionStorage.getItem("pv"),
+                    }),
+                });
+                if (!r.ok) throw new Error(await r.text());
+                return r.json();
+            }
+
+            async function doRefresh() {
+                const r = await fetch("https://accounts.spotify.com/api/token", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                    body: new URLSearchParams({
+                        grant_type: "refresh_token",
+                        refresh_token: localStorage.getItem("sp_r"),
+                        client_id: CLIENT_ID,
+                    }),
+                });
+                if (!r.ok) throw new Error(await r.text());
+                return r.json();
+            }
+
+            function saveTokens(d) {
+                localStorage.setItem("sp_a", d.access_token);
+                if (d.refresh_token) localStorage.setItem("sp_r", d.refresh_token);
+                localStorage.setItem("sp_e", Date.now() + (d.expires_in - 60) * 1000);
+            }
+
+            async function getToken() {
+                if (localStorage.getItem("sp_a") && Date.now() < +localStorage.getItem("sp_e"))
+                    return localStorage.getItem("sp_a");
+                if (localStorage.getItem("sp_r")) {
+                    const d = await doRefresh(); saveTokens(d); return d.access_token;
+                }
+                throw new Error("no token");
+            }
+
+            // Only remove Spotify keys -- never wipe unrelated localStorage entries.
+            function clearTokens() {
+                localStorage.removeItem("sp_a");
+                localStorage.removeItem("sp_r");
+                localStorage.removeItem("sp_e");
+            }
+
+            return { startPKCE, exchangeCode, saveTokens, getToken, clearTokens };
+        })();
+
+        // =========================================================================
+        // §4  RENDERER SETUP
+        //     Future: swap CSS-filter glow for proper post-processing pass here.
+        // =========================================================================
+
+        function setupRenderer() {
+            const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+            renderer.setSize(innerWidth, innerHeight);
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1.0;
+            renderer.outputColorSpace = THREE.SRGBColorSpace;
+            Object.assign(renderer.domElement.style, { position: "fixed", inset: "0", zIndex: "1" });
+            document.body.appendChild(renderer.domElement);
+
+            // CSS-filter glow: a blurred+brightened copy layered behind the main canvas.
+            const glowCanvas = renderer.domElement.cloneNode();
+            Object.assign(glowCanvas.style, {
+                position: "fixed", inset: "0", zIndex: "0", pointerEvents: "none",
+                filter: `blur(${(CONFIG.BLOOM_RADIUS * 14).toFixed(1)}px) brightness(${(CONFIG.BLOOM_STRENGTH * 0.6 + 1).toFixed(2)})`,
+                opacity: Math.min(CONFIG.BLOOM_STRENGTH / 7, 0.95).toFixed(2),
+            });
+            document.body.insertBefore(glowCanvas, renderer.domElement);
+            const glowCtx = glowCanvas.getContext("2d");
+
+            function updateGlow() {
+                glowCanvas.width = renderer.domElement.width;
+                glowCanvas.height = renderer.domElement.height;
+                glowCtx.drawImage(renderer.domElement, 0, 0);
+            }
+
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x020110);
+            scene.fog = new THREE.FogExp2(0x020110, 0.0016);
+
+            const camera = new THREE.PerspectiveCamera(65, innerWidth / innerHeight, 0.1, 4000);
+
+            window.addEventListener("resize", () => {
+                camera.aspect = innerWidth / innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(innerWidth, innerHeight);
+            });
+
+            return { renderer, scene, camera, updateGlow };
+        }
+
+        // =========================================================================
+        // §5  SCENE DRESSING  -- lights, stars
+        //     Returns handles for future audio-reactive updates (#8).
+        //     Future: add planets, nebulae, wormholes (#9).
+        // =========================================================================
+
+        function buildSceneDressing(scene) {
+            scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+            const sun = new THREE.DirectionalLight(0xffffff, 0.85);
+            sun.position.set(50, 100, 30);
+            scene.add(sun);
+
+            const N = 1600;
+            const starPos = new Float32Array(N * 3);
+            for (let i = 0; i < N; i++) {
+                const theta = Math.random() * Math.PI * 2;
+                const phi = Math.acos(2 * Math.random() - 1);
+                const r = 500 + Math.random() * 1500;
+                starPos[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+                starPos[i * 3 + 1] = Math.abs(r * Math.cos(phi)) + 20;
+                starPos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta);
+            }
+            const starGeo = new THREE.BufferGeometry();
+            starGeo.setAttribute("position", new THREE.Float32BufferAttribute(starPos, 3));
+            const stars = new THREE.Points(starGeo,
+                new THREE.PointsMaterial({ color: 0xffffff, size: 2.2, sizeAttenuation: true }));
+            scene.add(stars);
+
+            return { sun, stars };
+        }
+
+        // =========================================================================
+        // §6  TRACK SYSTEM
+        //     getPoseAtDist() is the authoritative world-space pose source.
+        //     Car, camera, and beat notes ALL call it -- never sample curves directly.
+        //
+        //     seg = { curves[], cumLen[], rolls[], startDist, segLen, ribbons[] }
+        //
+        //     Future: replace random knot generator with measure-snapped,
+        //     intensity-driven layout (#5).  getPoseAtDist() contract stays stable.
+        // =========================================================================
+
+        function createTrackSystem(scene) {
+            const { SEG_KNOTS, KNOT_LEN, SEG_SUBS, ARC_DIV,
+                YAW_MAX, PITCH_MAX, ROLL_ACCEL, ROLL_RATE_MAX, ROLL_SCALE,
+                ROLL_VISUAL_SCALE, TRACK_COUNT, TRACK_SPACE,
+                LANE_COLORS, TRACK_EMISSIVE } = CONFIG;
+            const LANE_HALF = TRACK_SPACE / 2 * 0.97;
+
+            const segments = [];
+            let totalDist = 0;
+
+            // Mutable generator state -- carries C1 continuity across segment boundaries.
+            const gen = {
+                pos: new THREE.Vector3(0, 0, 0),
+                tang: new THREE.Vector3(0, 0, -1),
+                roll: 0,
+                droll: 0,
+            };
+
+            function addSegment() {
+                const curves = [];
+                const cumLen = [0];
+                const rolls = [gen.roll];
+
+                for (let k = 0; k < SEG_KNOTS; k++) {
+                    const yawD = (Math.random() - 0.5) * YAW_MAX;
+                    const pitchD = (Math.random() - 0.5) * PITCH_MAX;
+
+                    const endTang = gen.tang.clone();
+                    endTang.applyAxisAngle(WY, yawD);
+                    const right0 = new THREE.Vector3().crossVectors(endTang, WY).normalize();
+                    endTang.applyAxisAngle(right0, pitchD);
+                    endTang.normalize();
+
+                    const midDir = gen.tang.clone().add(endTang).normalize();
+                    const endPos = gen.pos.clone().addScaledVector(midDir, KNOT_LEN);
+
+                    gen.droll = clamp(
+                        gen.droll + (Math.random() - 0.5) * ROLL_ACCEL,
+                        -ROLL_RATE_MAX, ROLL_RATE_MAX
+                    );
+                    gen.roll += gen.droll * ROLL_SCALE;
+                    rolls.push(gen.roll);
+
+                    const h = KNOT_LEN / 3;
+                    const P0 = gen.pos.clone();
+                    const P1 = gen.pos.clone().addScaledVector(gen.tang, h);
+                    const P2 = endPos.clone().addScaledVector(endTang, -h);
+                    const P3 = endPos.clone();
+
+                    const bezier = new THREE.CubicBezierCurve3(P0, P1, P2, P3);
+                    bezier.arcLengthDivisions = ARC_DIV;
+                    cumLen.push(cumLen[cumLen.length - 1] + bezier.getLength());
+                    curves.push(bezier);
+
+                    gen.pos.copy(endPos);
+                    gen.tang.copy(endTang);
+                }
+
+                const segLen = cumLen[SEG_KNOTS];
+                const ribbons = _buildRibbons(curves, cumLen, rolls);
+                ribbons.forEach(r => scene.add(r));
+                segments.push({ curves, cumLen, rolls, startDist: totalDist, segLen, ribbons });
+                totalDist += segLen;
+            }
+
+            // Build lane ribbon meshes for one segment.
+            // Uses frameFromTangRoll() + ROLL_VISUAL_SCALE so visual tilt matches
+            // getPoseAtDist() exactly.
+            function _buildRibbons(curves, cumLen, rolls) {
+                return LANE_COLORS.map((color, lane) => {
+                    const lc = LANE_CENTER_OFFSETS[lane];
+                    const vPos = [], vIdx = [];
+                    let vert = 0;
+
+                    for (let k = 0; k < SEG_KNOTS; k++) {
+                        const bezier = curves[k];
+                        const rollA = rolls[k], rollB = rolls[k + 1];
+                        // Skip first vertex of each knot after k=0 to avoid a
+                        // duplicate at the C1 junction.
+                        const siStart = (k === 0) ? 0 : 1;
+
+                        for (let si = siStart; si <= SEG_SUBS; si++) {
+                            const frac = si / SEG_SUBS;
+                            const t = bezier.getUtoTmapping(frac);
+                            const p = bezier.getPoint(t);
+                            const tng = bezier.getTangent(t).normalize();
+                            const roll = (rollA + (rollB - rollA) * frac) * ROLL_VISUAL_SCALE;
+                            const { right } = frameFromTangRoll(tng, roll);
+
+                            vPos.push(
+                                p.x + right.x * (lc - LANE_HALF), p.y + right.y * (lc - LANE_HALF), p.z + right.z * (lc - LANE_HALF),
+                                p.x + right.x * (lc + LANE_HALF), p.y + right.y * (lc + LANE_HALF), p.z + right.z * (lc + LANE_HALF),
+                            );
+                            if (vert > 0) {
+                                const a = (vert - 1) * 2, b = (vert - 1) * 2 + 1;
+                                const c = vert * 2, d = vert * 2 + 1;
+                                vIdx.push(a, b, c, b, d, c);
+                            }
+                            vert++;
+                        }
+                    }
+
+                    const geo = new THREE.BufferGeometry();
+                    geo.setAttribute("position", new THREE.Float32BufferAttribute(vPos, 3));
+                    geo.setIndex(vIdx);
+                    geo.computeVertexNormals();
+                    return new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+                        color, emissive: new THREE.Color(color),
+                        emissiveIntensity: TRACK_EMISSIVE,
+                        roughness: 0.55, metalness: 0.15,
+                        side: THREE.DoubleSide,
+                    }));
+                });
+            }
+
+            // Authoritative pose lookup -- returns a world-space Matrix4 at dist.
+            function getPoseAtDist(dist) {
+                let seg = segments[segments.length - 1];
+                for (let i = 0; i < segments.length; i++) {
+                    if (segments[i].startDist + segments[i].segLen >= dist) { seg = segments[i]; break; }
+                }
+                const local = clamp(dist - seg.startDist, 0, seg.segLen);
+
+                let ki = seg.curves.length - 1;
+                for (let k = 0; k < seg.curves.length; k++) {
+                    if (seg.cumLen[k + 1] >= local) { ki = k; break; }
+                }
+                const kLen = seg.cumLen[ki + 1] - seg.cumLen[ki];
+                const frac = kLen > 0 ? clamp((local - seg.cumLen[ki]) / kLen, 0, 1) : 0;
+
+                const t = seg.curves[ki].getUtoTmapping(frac);
+                const pos = seg.curves[ki].getPoint(t);
+                const tang = seg.curves[ki].getTangent(t).normalize();
+                const roll = (seg.rolls[ki] + (seg.rolls[ki + 1] - seg.rolls[ki]) * frac) * ROLL_VISUAL_SCALE;
+                const { right, up } = frameFromTangRoll(tang, roll);
+
+                const rx = right.clone().normalize();
+                const rz = tang.clone().normalize();
+                const ry = new THREE.Vector3().crossVectors(rz, rx).normalize(); // -up, FIXME
+                const pose = new THREE.Matrix4()
+                    .makeBasis(rx, ry, rz)
+                    .setPosition(pos);
+                return pose;
+            }
+
+            // Per-frame: extend track ahead, dispose passed segments.
+            function update(carDist) {
+                while (totalDist - carDist < BEAT_LOOKAHEAD * 2.5) addSegment();
+                for (let i = segments.length - 1; i >= 0; i--) {
+                    const s = segments[i];
+                    if (s.startDist + s.segLen < carDist - BEAT_LOOKAHEAD * 0.5) {
+                        s.ribbons.forEach(r => { scene.remove(r); r.geometry.dispose(); });
+                        segments.splice(i, 1);
+                    }
+                }
+            }
+
+            function reset(startDist) {
+                for (const seg of segments) {
+                    seg.ribbons.forEach(r => { scene.remove(r); r.geometry.dispose(); });
+                }
+                segments.length = 0;
+                totalDist = 0;
+                gen.pos.set(0, 0, 0);
+                gen.tang.set(0, 0, -1);
+                gen.roll = 0;
+                gen.droll = 0;
+                while (totalDist < BEAT_LOOKAHEAD * 3 + startDist) addSegment();
+            }
+
+            // LOGIC TEST
+            function verifyPoseDirection(samples = 24, step = 1e-3) {
+                if (totalDist <= step) return true;
+                const pos = new THREE.Vector3();
+                const ahead = new THREE.Vector3();
+                const forward = new THREE.Vector3();
+                const tang = new THREE.Vector3();
+
+                for (let i = 0; i <= samples; i++) {
+                    const dist = Math.min(totalDist - step, i / samples * (totalDist - step));
+                    const pose = getPoseAtDist(dist);
+                    const nextPose = getPoseAtDist(dist + step);
+                    pos.setFromMatrixPosition(pose);
+                    ahead.setFromMatrixPosition(nextPose);
+                    forward.copy(ahead).sub(pos);
+                    tang.setFromMatrixColumn(pose, 2);
+                    if (forward.dot(tang) <= 0) return false;
+                }
+                return true;
+            }
+
+            while (totalDist < BEAT_LOOKAHEAD * 3) addSegment();
+            return { getPoseAtDist, update, reset, verifyPoseDirection };
+        }
+
+        // =========================================================================
+        // §7  CAR
+        //     facing +z
+        //     Future: open-top body (#2), passenger positions (#3).
+        // =========================================================================
+
+        function buildCar(scene) {
+            const car = new THREE.Group();
+
+            car.add(new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.58, 4.2),
+                new THREE.MeshLambertMaterial({ color: 0xff1833 })));
+
+            const cab = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.48, 1.8),
+                new THREE.MeshLambertMaterial({ color: 0x081020 }));
+            cab.position.set(0, 0.53, 0.2);
+            car.add(cab);
+
+            const spoiler = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.07, 0.35),
+                new THREE.MeshLambertMaterial({ color: 0xcc0020 }));
+            spoiler.position.set(0, 0.76, -1.95);
+            car.add(spoiler);
+            const spoilerPost = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.48, 0.1),
+                new THREE.MeshLambertMaterial({ color: 0xcc0020 }));
+            spoilerPost.position.set(0, 0.52, -1.95);
+            car.add(spoilerPost);
+
+            const wheelGeo = new THREE.CylinderGeometry(0.52, 0.52, 0.35, 14);
+            const wheelMat = new THREE.MeshLambertMaterial({ color: 0x0c0c0c });
+            [[-1.45, -0.2, 1.42], [1.45, -0.2, 1.42],
+            [-1.45, -0.2, -1.42], [1.45, -0.2, -1.42]].forEach(([x, y, z]) => {
+                const w = new THREE.Mesh(wheelGeo, wheelMat);
+                w.rotation.z = Math.PI / 2; w.position.set(x, y, z);
+                car.add(w);
+            });
+
+            const hlMat = new THREE.MeshBasicMaterial({ color: 0xffffcc });
+            [[-0.62, 0.08, 2.12], [0.62, 0.08, 2.12]].forEach(([x, y, z]) => {
+                const h = new THREE.Mesh(new THREE.SphereGeometry(0.19, 8, 6), hlMat);
+                h.position.set(x, y, z); car.add(h);
+            });
+            const hlLight = new THREE.SpotLight(0xffeedd, 3, 50, 0.4, 0.5);
+            hlLight.position.set(0, 0.2, 2.4);
+            car.add(hlLight);
+            car.add(hlLight.target);
+            hlLight.target.position.set(0, 0, 20);
+
+            scene.add(car);
+            return car;
+        }
+
+        // =========================================================================
+        // §8  BEAT NOTE SYSTEM
+        //     Object pool of slab meshes placed via track.getPoseAtDist().
+        //     Future: transparent target notes (#4), spectrum colour drive (#8).
+        // =========================================================================
+
+        function createBeatSystem(scene, track) {
+            const { TRACK_COUNT, TRACK_SPACE, LANE_COLORS, BEAT_BURST_DIST, BEAT_BURST_AFTER } = CONFIG;
+            const active = [];
+            let colIdx = 0;
+
+            const beatLight = new THREE.PointLight(0xffffff, 0, 80);
+            scene.add(beatLight);
+            let flashDecay = 0;
+
+
+            const beatGeometry = new THREE.BoxGeometry(TRACK_SPACE * 0.93, 0.6, 4.0);
+
+            function _createBeatMesh() {
+                return new THREE.Mesh(
+                    beatGeometry,
+                    new THREE.MeshStandardMaterial({ //TODO reuse
+                        color: 0xffff66, emissive: 0xffff88,
+                        emissiveIntensity: 0.8, transparent: true, opacity: 0.96,
+                    })
+                );
+            }
+
+            function _destroyBeatMesh(mesh) {
+                scene.remove(mesh);
+                mesh.geometry.dispose();
+                mesh.material.dispose();
+            }
+
+            function _placeMesh(mesh) {
+                const { hitDist, lane } = mesh.userData;
+                const pose = track.getPoseAtDist(hitDist);
+                const right = new THREE.Vector3().setFromMatrixColumn(pose, 0);
+                const up = new THREE.Vector3().setFromMatrixColumn(pose, 1);
+                const laneOffset = LANE_CENTER_OFFSETS[lane];
+
+                mesh.position.setFromMatrixPosition(pose)
+                    .addScaledVector(right, laneOffset)
+                    .addScaledVector(up, 0.18);
+
+                mesh.quaternion.setFromRotationMatrix(pose);
+                mesh.visible = true;
+            }
+
+            function spawnAt(hitDist, lane = null) {
+                //console.log(`spawn beat at dist ${hitDist.toFixed(1)} lane ${lane}`);
+                const mesh = _createBeatMesh();
+
+                if (lane === null) {
+                    lane = Math.floor(Math.random() * TRACK_COUNT);
+                }
+
+                // color
+                const color = LANE_COLORS[lane];
+                mesh.material.color.setHex(color);
+                mesh.material.emissive.setHex(color);
+                mesh.material.emissiveIntensity = 0.8;
+                mesh.material.opacity = 0.96;
+                mesh.scale.set(1, 1, 1);
+                mesh.userData = { hitDist, lane, triggered: false };
+
+
+                scene.add(mesh);
+                _placeMesh(mesh);
+                active.push(mesh);
+
+                // FIXME
+                colIdx++;
+                beatLight.color.setHex(LANE_COLORS[colIdx % TRACK_COUNT]);
+                flashDecay = 1.0;
+            }
+
+            function clearAll() {
+                for (const mesh of active) {
+                    _destroyBeatMesh(mesh);
+                }
+                active.length = 0;
+            }
+
+            function update(carDist, carPos, carUp, dt) {
+                for (let i = active.length - 1; i >= 0; i--) {
+                    const mesh = active[i];
+                    const diff = mesh.userData.hitDist - carDist;
+
+                    if (diff < BEAT_BURST_DIST && diff >= -BEAT_BURST_AFTER) {
+                        const frac = 1 - (diff + BEAT_BURST_AFTER) / (BEAT_BURST_DIST + BEAT_BURST_AFTER);
+                        mesh.material.emissiveIntensity = 0.8 + frac * 15.5;
+                        mesh.material.opacity = 1 - frac * 1.0;
+                        mesh.scale.set(1 + 0.2 * frac, 1 + 0.2 * frac, 1 + 0.2 * frac);
+                    }
+                    if (diff < -BEAT_BURST_AFTER) {
+                        _destroyBeatMesh(mesh);
+                        active.splice(i, 1);
+                    }
+
+                    const time_lead = diff / CONFIG.CAR_SPEED;
+                    const lane = lanes[mesh.userData.lane];
+
+                    if (time_lead <= 0.0) {
+                        // trigger the highlight effect on the target 
+                        if (!mesh.userData.triggered) {
+                            lane.userData.hl = 1.0;
+                            mesh.userData.triggered = true;
+                        }
+                    }
+                    else if (time_lead < CONFIG.BEAT_BURST_TARGET_LEAD) {
+                        lane.userData.hl = - time_lead / CONFIG.BEAT_BURST_TARGET_LEAD;
+                    }
+                }
+
+                for (let i = 0; i < lanes.length; i++) {
+                    const lane = lanes[i];
+                    const hl = lane.userData.hl;
+                    lane.material.emissiveIntensity = 0.8 + hl * 15.5;
+                    lane.material.opacity = 0.24 + hl * 0.36;
+
+                    // update animation clock
+                    if (hl > 0) lane.userData.hl = Math.max(0, hl - dt / CONFIG.BEAT_BURST_TARGET_LINGER);
+                }
+
+                const trackPose = track.getPoseAtDist(carDist);
+                beatTarget.position.setFromMatrixPosition(trackPose);
+                beatTarget.quaternion.setFromRotationMatrix(trackPose);
+
+                // FIXME
+                beatLight.position.copy(carPos).addScaledVector(carUp, 2);
+                flashDecay = Math.max(0, flashDecay - dt * 3.5);
+                beatLight.intensity = flashDecay * 5;
+            }
+
+            // Create the beat target mesh, which is the same as the beats but with more opacity, and is fixed in front of the car.
+            const beatTarget = new THREE.Object3D();
+            const lanes = [];
+            function _createBeatTargetMesh() {
+                for (let lane = 0; lane < TRACK_COUNT; lane++) {
+                    console.log(`create beat target for lane ${lane}`);
+                    const target = _createBeatMesh();
+                    const targetGeometry = new THREE.BoxGeometry(TRACK_SPACE, 0.6, 4.0);
+                    target.geometry = targetGeometry;
+
+                    const color = LANE_COLORS[lane];
+                    target.material.color.setHex(0x000000);
+                    target.material.emissive.setHex(color);
+                    target.material.emissiveIntensity = 0.8;
+                    target.material.opacity = 0.24;
+                    target.scale.set(1, 1, 1);
+
+                    target.position.set(LANE_CENTER_OFFSETS[lane], 0.18, 0)
+
+                    target.userData = { lane, hl: 0.0 };
+                    lanes.push(target);
+
+                    beatTarget.add(target);
+                }
+            }
+            _createBeatTargetMesh();
+            scene.add(beatTarget);
+
+            console.log("beat system created");
+
+            return { spawnAt, update, clearAll };
+        }
+
+        // =========================================================================
+        // §9  AUDIO ANALYSER
+        //     Monkey-patches AudioContext BEFORE the SDK creates its context.
+        //     Future: expose freqData for spectrum lighting (#8).
+        //     Future: replace with server-streamed source (#7).
+        // =========================================================================
+
+        function createAudioAnalyser() {
+            const _OrigAC = window.AudioContext || window.webkitAudioContext;
+            let actx = null, analyser = null;
+
+            const muteBanner = document.getElementById("mute-banner");
+
+            window.AudioContext = window.webkitAudioContext = function (...args) {
+                actx = new _OrigAC(...args);
+                if (actx.state === "suspended") muteBanner.style.display = "block";
+                actx.onstatechange = () => {
+                    if (actx.state === "running") muteBanner.style.display = "none";
+                    else if (actx.state === "suspended") muteBanner.style.display = "block";
+                };
+                const origCreateGain = actx.createGain.bind(actx);
+                actx.createGain = function () {
+                    const gain = origCreateGain();
+                    const origConnect = gain.connect.bind(gain);
+                    gain.connect = function (dest, ...rest) {
+                        if (dest === actx.destination && !analyser) {
+                            analyser = actx.createAnalyser();
+                            analyser.fftSize = 2048;
+                            analyser.smoothingTimeConstant = 0.72;
+                            origConnect(analyser);
+                            analyser.connect(actx.destination);
+                        }
+                        return origConnect(dest, ...rest);
+                    };
+                    return gain;
+                };
+                return actx;
+            };
+
+            const HIST = 48;
+            const freqData = new Uint8Array(1024);
+            const timeData = new Float32Array(2048);
+            const bassHist = new Float32Array(HIST);
+            let histIdx = 0;
+            let lastBeatWallMs = 0;   // wall-clock time of last detected beat
+            let beatIntervals = [];  // recent inter-beat intervals (ms)
+
+            // bpm        -- current estimated tempo
+            // energy     -- smoothed RMS energy [0..1]
+            // lastBeatTrackMs  -- track position (ms) when the last beat was detected
+            // nextBeatTrackMs  -- next beat to schedule (track ms); owned by render loop
+            const state = {
+                bpm: 120,
+                energy: 0.3,
+                lastBeatTrackMs: -1,   // -1 = no beat detected yet
+                nextBeatTrackMs: 0,
+            };
+
+            // Called every frame while playing.
+            // nowMs       = performance.now()
+            // trackPosMs  = interpolated Spotify position (ms)
+            function read(nowMs, trackPosMs) {
+                if (!analyser) return;
+                analyser.getByteFrequencyData(freqData);
+                analyser.getFloatTimeDomainData(timeData);
+
+                let bass = 0;
+                for (let i = 1; i <= 14; i++) bass += freqData[i];
+                bass /= 14 * 255;
+
+                let rms = 0;
+                for (const v of timeData) rms += v * v;
+                rms = Math.sqrt(rms / timeData.length);
+
+                bassHist[histIdx] = bass;
+                histIdx = (histIdx + 1) % HIST;
+
+                let avg = 0;
+                for (const v of bassHist) avg += v;
+                avg /= HIST;
+
+                state.energy += (rms * 2.2 - state.energy) * 0.12;
+
+                const isBeat = bass > avg * 1.45 + 0.012
+                    && bass > 0.016
+                    && nowMs - lastBeatWallMs > 190;
+
+                if (isBeat) {
+                    const iv = lastBeatWallMs > 0 ? nowMs - lastBeatWallMs : 0;
+                    lastBeatWallMs = nowMs;
+
+                    // Update BPM from recent intervals.
+                    if (iv > 200 && iv < 2000) {
+                        beatIntervals.push(iv);
+                        if (beatIntervals.length > 12) beatIntervals.shift();
+                        const avg2 = beatIntervals.reduce((a, b) => a + b, 0) / beatIntervals.length;
+                        state.bpm = clamp(60000 / avg2, 40, 220);
+                    }
+
+                    // Record the track position of this beat as the new phase anchor.
+                    // The render-loop scheduler uses this to compute future beat positions.
+                    state.lastBeatTrackMs = trackPosMs;
+                    // Align nextBeatTrackMs to this beat (keeps phase locked).
+                    state.nextBeatTrackMs = trackPosMs;
+                }
+            }
+
+            function tryResume() {
+                if (actx && actx.state === "suspended") actx.resume().catch(() => { });
+            }
+            function isRunning() {
+                return actx !== null && actx.state === "running";
+            }
+
+            return { read, state, tryResume, isRunning };
+        }
+
+        // =========================================================================
+        // §10  HUD  -- thin DOM wrapper
+        //      Future: multiplayer scores / profiles (#3).
+        // =========================================================================
+
+        const Hud = (() => {
+            const elTrack = document.getElementById("h-track");
+            const elArtist = document.getElementById("h-artist");
+            const elStats = document.getElementById("h-stats");
+            const elProg = document.getElementById("prog-fill");
+            return {
+                setTrack(name, artists) {
+                    elTrack.textContent = name || "—";
+                    elArtist.textContent = artists || "";
+                },
+                setStats(bpm, energy) {
+                    elStats.textContent = `BPM ${bpm.toFixed(0)}   Energy ${(energy * 100).toFixed(0)}%`;
+                },
+                setProgress(fraction) {
+                    elProg.style.width = (fraction * 100) + "%";
+                },
+            };
+        })();
+
+        // =========================================================================
+        // §11  SPOTIFY PLAYER  -- SDK + state relay
+        //      Handles all SDK events.  Always transfers with play:true so the
+        //      visualiser has audio to work with after every page load.
+        //      Future: server-controlled mode (#7), Discord source (#6).
+        // =========================================================================
+
+        function setupSpotifyPlayer(onState) {
+            // Returned so boot() can call player.getCurrentState() directly.
+            let _player = null;
+
+            window.onSpotifyWebPlaybackSDKReady = function () {
+                _player = new Spotify.Player({
+                    name: "Goontunes",
+                    getOAuthToken: async cb => {
+                        try { cb(await SpotifyAuth.getToken()); }
+                        catch (e) {
+                            console.error("Goontunes: token error", e);
+                            SpotifyAuth.clearTokens();
+                        }
+                    },
+                    volume: 1.0,
+                });
+
+                // ── All SDK events ──────────────────────────────────────────────
+                _player.addListener("ready", ({ device_id }) => {
+                    console.log("Goontunes: SDK ready, device", device_id);
+                    _player.device_id = device_id;
+
+                    transferAndPlay();
+                });
+
+                _player.addListener("not_ready", ({ device_id }) => {
+                    console.warn("Goontunes: device went offline", device_id);
+                });
+
+                _player.addListener("player_state_changed", st => {
+                    console.log("Goontunes: player state changed", st);
+                    if (st) onState(st);
+                });
+
+                _player.addListener("initialization_error", ({ message }) => {
+                    console.error("Goontunes: Spotify init error:", message);
+                });
+
+                _player.addListener("authentication_error", ({ message }) => {
+                    console.error("Goontunes: Spotify auth error:", message);
+                    SpotifyAuth.clearTokens();
+                });
+
+                _player.addListener("account_error", ({ message }) => {
+                    console.error("Goontunes: Spotify account error (Premium required?):", message);
+                });
+
+                _player.addListener("playback_error", ({ message }) => {
+                    console.error("Goontunes: Spotify playback error:", message);
+                });
+
+                _player.connect();
+            };
+
+            // Transfer active playback to our SDK device and ensure it is playing.
+            // play:true means "start / resume on this device" -- this intentionally
+            // resumes a paused track so the visualiser always has audio.
+            async function transferAndPlay() {
+                if (!_player || !_player.device_id) {
+                    console.warn("Goontunes: cannot transfer, player not ready");
+                    return;
+                }
+
+                _player.activateElement().then(() => {
+                    console.log("Goontunes: device activated");
+                }).catch(e => {
+                    console.warn("Goontunes: device activation failed", e);
+                });
+
+                console.log("Goontunes: transferring playback to SDK device");
+                try {
+                    const tok = await SpotifyAuth.getToken();
+                    const r = await fetch("https://api.spotify.com/v1/me/player", {
+                        method: "PUT",
+                        headers: { Authorization: "Bearer " + tok, "Content-Type": "application/json" },
+                        body: JSON.stringify({ device_ids: [_player.device_id], play: true }),
+                    });
+                    // 204 = success immediately; 202 = accepted (async OK)
+                    if (!r.ok && r.status !== 202 && r.status !== 204) {
+                        const body = await r.text().catch(() => "");
+                        console.warn("Goontunes: transfer failed", r.status, body);
+                    }
+                    // SDK fires player_state_changed once transfer completes.
+                    // If nothing is queued on Spotify, no event fires -- that is fine,
+                    // the user just needs to start a track from the Spotify app.
+                } catch (e) {
+                    console.warn("Goontunes: transfer error", e);
+                }
+            };
+
+            console.log("Goontunes: injecting Spotify SDK script");
+
+            const sdkScript = document.createElement("script");
+            sdkScript.src = "https://sdk.scdn.co/spotify-player.js";
+            document.head.appendChild(sdkScript);
+
+            function get_player() {
+                if (_player) return _player;
+                else console.warn("Goontunes: Spotify player not ready yet");
+            }
+            return { get_player, transferAndPlay };
+        }
+
+        // =========================================================================
+        // §12  BOOT  -- wires all subsystems together
+        //      Future: swap the visualizer block for alternate 3D modes (#10).
+        // =========================================================================
+
+        function boot() {
+            document.getElementById("ui").style.display = "none";
+            document.getElementById("hud").style.display = "block";
+
+            // Audio analyser MUST be created before SDK script is injected so the
+            // AudioContext monkey-patch is in place when the SDK creates its context.
+            const audio = createAudioAnalyser();
+            audio.tryResume();
+
+            const { renderer, scene, camera, updateGlow } = setupRenderer();
+            buildSceneDressing(scene);
+            const track = createTrackSystem(scene);
+            if (!track.verifyPoseDirection()) {
+                console.error("track.getPoseAtDist() tangent validation failed: tang is not pointing down the track");
+            } else {
+                console.log("track.getPoseAtDist() tangent validation passed");
+            }
+            const car = buildCar(scene);
+            const beats = createBeatSystem(scene, track);
+            const clock = new THREE.Clock();
+
+            let carDist = BEAT_LOOKAHEAD * 0.15;
+            let lastTrackPositionMs = 0;
+            let lastTrackId = null;
+
+            function resetBeatRoadAndCar(trackPosMs) {
+                carDist = (trackPosMs / 1000) * CONFIG.CAR_SPEED + BEAT_LOOKAHEAD * 0.15;
+                beats.clearAll();
+                track.reset(carDist);
+                audio.state.nextBeatTrackMs = trackPosMs;
+                audio.state.lastBeatTrackMs = trackPosMs;
+            }
+
+            // ── Playback clock ────────────────────────────────────────────────────
+            // Tracks Spotify position with wall-clock interpolation between events.
+            // This is the single source of truth for track position in the render loop.
+            const playback = {
+                positionMs: 0,
+                updatedAt: performance.now(),
+                paused: true,
+                duration: 0,
+
+                update(st) {
+                    this.positionMs = st.position;
+                    this.updatedAt = performance.now();
+                    this.paused = st.paused;
+                    this.duration = st.duration;
+                },
+
+                // Interpolated current track position (ms).
+                currentMs() {
+                    if (this.paused) return this.positionMs;
+                    return this.positionMs + (performance.now() - this.updatedAt);
+                },
+
+                // Progress as a 0..1 fraction.
+                fraction() {
+                    return this.duration > 0
+                        ? Math.min(this.currentMs() / this.duration, 1)
+                        : 0;
+                },
+            };
+
+            // ── Render loop ───────────────────────────────────────────────────────
+            function animate() {
+                requestAnimationFrame(animate);
+                const dt = Math.min(clock.getDelta(), 0.05);
+                const now = performance.now();
+                const trackPosMs = playback.currentMs();
+
+                // Car only moves while Spotify is playing.
+                if (!playback.paused) {
+                    carDist += CONFIG.CAR_SPEED * dt;
+                    audio.read(now, trackPosMs);
+                }
+
+                track.update(carDist);
+
+                const carPose = track.getPoseAtDist(carDist - CONFIG.CAR_OFFSET);
+                const carUp = new THREE.Vector3().setFromMatrixColumn(carPose, 1);
+                car.position.setFromMatrixPosition(carPose).addScaledVector(carUp, CONFIG.CAR_LIFT);
+                car.setRotationFromMatrix(carPose);
+
+
+                const trackPose = track.getPoseAtDist(carDist);
+                const trackPos = new THREE.Vector3().setFromMatrixPosition(trackPose);
+                const trackUp = new THREE.Vector3().setFromMatrixColumn(trackPose, 1);
+                const trackRight = new THREE.Vector3().setFromMatrixColumn(trackPose, 0);
+                const trackTang = new THREE.Vector3().setFromMatrixColumn(trackPose, 2);
+                camera.position.copy(trackPos)
+                    .addScaledVector(trackTang, -CONFIG.CAM_BACK)
+                    .addScaledVector(trackUp, CONFIG.CAM_HEIGHT)
+                    .addScaledVector(trackRight, CONFIG.CAM_SIDE);
+                camera.lookAt(
+                    trackPos.clone()
+                        .addScaledVector(trackTang, CONFIG.CAM_LOOKAT_AHEAD)
+                        .addScaledVector(trackUp, CONFIG.CAM_LOOKAT_UP)
+                );
+
+                beats.update(carDist, car.position, carUp, dt);
+
+                // ── Beat scheduler ───────────────────────────────────────────────
+                // Beats are spawned at absolute track distances computed from the
+                // Spotify playback position + detected BPM + phase anchor.
+                // This ensures notes are in phase even after seeks or state changes.
+                if (!playback.paused) {
+                    const beatMs = 60000 / Math.max(40, audio.state.bpm);
+                    const aheadMs = CONFIG.BEAT_LOOKAHEAD_S * 1000;
+
+                    // Re-anchor if the scheduler fell behind (seek, track change, init).
+                    if (audio.state.nextBeatTrackMs < trackPosMs - beatMs) {
+                        audio.state.nextBeatTrackMs = trackPosMs;
+                    }
+
+                    // Spawn all beats that fall within the lookahead window.
+                    while (audio.state.nextBeatTrackMs < trackPosMs + aheadMs) {
+                        const msAhead = audio.state.nextBeatTrackMs - trackPosMs;
+                        const distAhead = (msAhead / 1000) * CONFIG.CAR_SPEED;
+                        beats.spawnAt(carDist + distAhead);
+                        audio.state.nextBeatTrackMs += beatMs;
+                    }
+                }
+
+                // Progress bar updated every frame from interpolated position.
+                Hud.setProgress(playback.fraction());
+                Hud.setStats(audio.state.bpm, audio.state.energy);
+                renderer.render(scene, camera);
+                updateGlow();
+            }
+            animate();
+
+            // ── Spotify state handler ─────────────────────────────────────────────
+            const player = setupSpotifyPlayer(st => {
+                playback.update(st);
+
+                if (!st.paused) audio.tryResume();
+
+                const t = st.track_window?.current_track;
+                if (t) Hud.setTrack(t.name, t.artists.map(a => a.name).join(", "));
+
+                const trackId = t?.id || null;
+                const seekDelta = Math.abs(st.position - lastTrackPositionMs);
+                const trackChanged = trackId !== lastTrackId;
+                if (trackChanged || (lastTrackPositionMs !== 0 && seekDelta > 800)) {
+                    resetBeatRoadAndCar(st.position);
+                }
+                lastTrackPositionMs = st.position;
+                lastTrackId = trackId;
+            });
+
+            // ── AudioContext resume on user gesture ───────────────────────────────
+            // Persistent -- only self-removes once context is confirmed running.
+            function _gestureResume() {
+                audio.tryResume();
+                if (audio.isRunning()) {
+                    player.transferAndPlay();
+                    document.removeEventListener("click", _gestureResume);
+                    document.removeEventListener("keydown", _gestureResume);
+                    document.removeEventListener("touchend", _gestureResume);
+                }
+            }
+            document.addEventListener("click", _gestureResume);
+            document.addEventListener("keydown", _gestureResume);
+            document.addEventListener("touchend", _gestureResume);
+        }
+
+        // =========================================================================
+        // §0  ENTRY POINT
+        // =========================================================================
+
+        const stEl = document.getElementById("st");
+        document.getElementById("login-btn").onclick = SpotifyAuth.startPKCE;
+
+        (async () => {
+            const params = new URLSearchParams(location.search);
+            if (params.has("code")) {
+                history.replaceState({}, "", location.pathname);
+                stEl.textContent = "Exchanging token...";
+                try { SpotifyAuth.saveTokens(await SpotifyAuth.exchangeCode(params.get("code"))); }
+                catch (e) { stEl.textContent = "Auth error: " + e.message; return; }
+            }
+            try { await SpotifyAuth.getToken(); }
+            catch {
+                stEl.textContent = "Click Connect to begin.";
+                return
+            }
+            boot();
+        })();
+
+    </script>
+</body>
+
+</html>
