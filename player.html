@@ -170,21 +170,6 @@
         // World-up axis -- treated as immutable throughout.
         const WY = new THREE.Vector3(0, 1, 0);
 
-        // Compute a right/up frame from a unit tangent + a roll angle (radians).
-        // This is the SINGLE implementation used by both ribbon mesh building (§6)
-        // and pose lookup (§6). They must always call this so the frames agree.
-        function frameFromTangRoll(tang, roll) {
-            let right = new THREE.Vector3().crossVectors(tang, WY);
-            if (right.lengthSq() < 1e-6) right.set(1, 0, 0);
-            right = right.normalize();
-            let up = new THREE.Vector3().crossVectors(right, tang).normalize();
-            if (roll !== 0) {
-                const q = new THREE.Quaternion().setFromAxisAngle(tang, roll);
-                right.applyQuaternion(q);
-                up.applyQuaternion(q);
-            }
-            return { right, up };
-        }
 
         // =========================================================================
         // §2  CONFIG  -- all tunable values in one place
@@ -225,7 +210,6 @@
 
             // Applied at render time to convert accumulated roll into visible tilt.
             // Used identically in ribbon mesh building AND getPoseAtDist().
-            // Both call frameFromTangRoll() so this is the single source of truth.
             ROLL_VISUAL_SCALE: 0.55,
 
             // -- Lane layout ------------------------------------------------------
@@ -415,7 +399,7 @@
         //     getPoseAtDist() is the authoritative world-space pose source.
         //     Car, camera, and beat notes ALL call it -- never sample curves directly.
         //
-        //     seg = { curves[], cumLen[], rolls[], startDist, segLen, ribbons[] }
+        //     seg = { curves[], cumLen[], rights[], startDist, segLen, ribbons[] }
         //
         //     Future: replace random knot generator with measure-snapped,
         //     intensity-driven layout (#5).  getPoseAtDist() contract stays stable.
@@ -442,7 +426,17 @@
             function addSegment() {
                 const curves = [];
                 const cumLen = [0];
-                const rolls = [gen.roll];
+                // Store a normalized right vector per knot (length = SEG_KNOTS + 1).
+                const rights = [];
+
+                // initial right at the start of the segment (uses current gen.tang)
+                {
+                    let baseRight = new THREE.Vector3().crossVectors(gen.tang, WY);
+                    if (baseRight.lengthSq() < 1e-6) baseRight.set(1, 0, 0);
+                    baseRight.normalize();
+                    const q0 = new THREE.Quaternion().setFromAxisAngle(gen.tang, gen.roll * ROLL_VISUAL_SCALE);
+                    rights.push(baseRight.clone().applyQuaternion(q0).normalize());
+                }
 
                 for (let k = 0; k < SEG_KNOTS; k++) {
                     const yawD = (Math.random() - 0.5) * YAW_MAX;
@@ -462,7 +456,15 @@
                         -ROLL_RATE_MAX, ROLL_RATE_MAX
                     );
                     gen.roll += gen.droll * ROLL_SCALE;
-                    rolls.push(gen.roll);
+
+                    // TODO, we want to store the amount of twist as well, so that we can have more than 180deg roll in a segment
+                    // TODO FIXME, this still doesn't prevent gimbal lock
+                    // compute right vector for the knot boundary using endTang
+                    let baseRight = new THREE.Vector3().crossVectors(endTang, WY);
+                    if (baseRight.lengthSq() < 1e-6) baseRight.set(1, 0, 0);
+                    baseRight.normalize();
+                    const q = new THREE.Quaternion().setFromAxisAngle(endTang, gen.roll * ROLL_VISUAL_SCALE);
+                    rights.push(baseRight.clone().applyQuaternion(q).normalize());
 
                     const h = KNOT_LEN / 3;
                     const P0 = gen.pos.clone();
@@ -480,16 +482,16 @@
                 }
 
                 const segLen = cumLen[SEG_KNOTS];
-                const ribbons = _buildRibbons(curves, cumLen, rolls);
+                const ribbons = _buildRibbons(curves, cumLen, rights);
                 ribbons.forEach(r => scene.add(r));
-                segments.push({ curves, cumLen, rolls, startDist: totalDist, segLen, ribbons });
+                segments.push({ curves, cumLen, rights, startDist: totalDist, segLen, ribbons });
                 totalDist += segLen;
             }
 
             // Build lane ribbon meshes for one segment.
-            // Uses frameFromTangRoll() + ROLL_VISUAL_SCALE so visual tilt matches
-            // getPoseAtDist() exactly.
-            function _buildRibbons(curves, cumLen, rolls) {
+            // Uses per-knot `rights[]` (already encoded with ROLL_VISUAL_SCALE)
+            // so visual tilt matches getPoseAtDist() exactly.
+            function _buildRibbons(curves, cumLen, rights) {
                 return LANE_COLORS.map((color, lane) => {
                     const lc = LANE_CENTER_OFFSETS[lane];
                     const vPos = [], vIdx = [];
@@ -497,7 +499,7 @@
 
                     for (let k = 0; k < SEG_KNOTS; k++) {
                         const bezier = curves[k];
-                        const rollA = rolls[k], rollB = rolls[k + 1];
+                        const rightA = rights[k], rightB = rights[k + 1];
                         // Skip first vertex of each knot after k=0 to avoid a
                         // duplicate at the C1 junction.
                         const siStart = (k === 0) ? 0 : 1;
@@ -507,8 +509,13 @@
                             const t = bezier.getUtoTmapping(frac);
                             const p = bezier.getPoint(t);
                             const tng = bezier.getTangent(t).normalize();
-                            const roll = (rollA + (rollB - rollA) * frac) * ROLL_VISUAL_SCALE;
-                            const { right } = frameFromTangRoll(tng, roll);
+                            // Interpolate the stored right vectors and re-orthonormalize
+                            // against the sampled tangent to avoid drift.
+                            let rx = rightA.clone().lerp(rightB, frac).normalize();
+                            const rz = tng.clone().normalize();
+                            const ry = new THREE.Vector3().crossVectors(rz, rx).normalize();
+                            rx = new THREE.Vector3().crossVectors(ry, rz).normalize();
+                            const right = rx;
 
                             vPos.push(
                                 p.x + right.x * (lc - LANE_HALF), p.y + right.y * (lc - LANE_HALF), p.z + right.z * (lc - LANE_HALF),
@@ -554,12 +561,14 @@
                 const t = seg.curves[ki].getUtoTmapping(frac);
                 const pos = seg.curves[ki].getPoint(t);
                 const tang = seg.curves[ki].getTangent(t).normalize();
-                const roll = (seg.rolls[ki] + (seg.rolls[ki + 1] - seg.rolls[ki]) * frac) * ROLL_VISUAL_SCALE;
-                const { right, up } = frameFromTangRoll(tang, roll);
-
-                const rx = right.clone().normalize();
+                // Interpolate stored right vectors (per-knot) and orthonormalize
+                // to the local tangent to build a stable basis.
+                const rightA = seg.rights[ki];
+                const rightB = seg.rights[ki + 1];
+                let rx = rightA.clone().lerp(rightB, frac).normalize();
                 const rz = tang.clone().normalize();
-                const ry = new THREE.Vector3().crossVectors(rz, rx).normalize(); // -up, FIXME
+                const ry = new THREE.Vector3().crossVectors(rz, rx).normalize();
+                rx = new THREE.Vector3().crossVectors(ry, rz).normalize();
                 const pose = new THREE.Matrix4()
                     .makeBasis(rx, ry, rz)
                     .setPosition(pos);
@@ -842,36 +851,11 @@
         // =========================================================================
 
         function createAudioAnalyser() {
-            const _OrigAC = window.AudioContext || window.webkitAudioContext;
-            let actx = null, analyser = null;
 
-            const muteBanner = document.getElementById("mute-banner");
-
-            window.AudioContext = window.webkitAudioContext = function (...args) {
-                actx = new _OrigAC(...args);
-                if (actx.state === "suspended") muteBanner.style.display = "block";
-                actx.onstatechange = () => {
-                    if (actx.state === "running") muteBanner.style.display = "none";
-                    else if (actx.state === "suspended") muteBanner.style.display = "block";
-                };
-                const origCreateGain = actx.createGain.bind(actx);
-                actx.createGain = function () {
-                    const gain = origCreateGain();
-                    const origConnect = gain.connect.bind(gain);
-                    gain.connect = function (dest, ...rest) {
-                        if (dest === actx.destination && !analyser) {
-                            analyser = actx.createAnalyser();
-                            analyser.fftSize = 2048;
-                            analyser.smoothingTimeConstant = 0.72;
-                            origConnect(analyser);
-                            analyser.connect(actx.destination);
-                        }
-                        return origConnect(dest, ...rest);
-                    };
-                    return gain;
-                };
-                return actx;
-            };
+            // This implementation uses tab capture (getDisplayMedia) to obtain
+            // an audio MediaStream from the current tab, then connects it to
+            // an analyser node. Monkey-patching the SDK's AudioContext was
+            // unreliable, so we request a user gesture to start capture.
 
             const HIST = 48;
             const freqData = new Uint8Array(1024);
@@ -881,22 +865,77 @@
             let lastBeatWallMs = 0;   // wall-clock time of last detected beat
             let beatIntervals = [];  // recent inter-beat intervals (ms)
 
-            // bpm        -- current estimated tempo
-            // energy     -- smoothed RMS energy [0..1]
-            // lastBeatTrackMs  -- track position (ms) when the last beat was detected
-            // nextBeatTrackMs  -- next beat to schedule (track ms); owned by render loop
             const state = {
                 bpm: 120,
                 energy: 0.3,
-                lastBeatTrackMs: -1,   // -1 = no beat detected yet
+                lastBeatTrackMs: -1,
                 nextBeatTrackMs: 0,
             };
+
+            let actx = null;
+            let analyser = null;
+
+            async function initTabCapture() {
+                try {
+                    // if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+                    //     console.warn("Tab capture not available in this browser");
+                    //     return;
+                    // }
+
+                    console.log("Requesting tab audio capture...");
+                    const _OrigAC = window.AudioContext || window.webkitAudioContext;
+                    actx = new _OrigAC();
+
+                    // Request display/media capture from the user. This must be
+                    // triggered by a user gesture in most browsers. It may capture
+                    // the tab audio when the user selects "Current tab".
+                    const stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: false, preferCurrentTab: true });
+                    const src = actx.createMediaStreamSource(stream);
+
+                    analyser = actx.createAnalyser();
+                    analyser.fftSize = 2048;
+                    analyser.smoothingTimeConstant = 0.72;
+
+                    src.connect(analyser);
+                    // Connect analyser to destination so audio continues to play.
+                    try { analyser.connect(actx.destination); } catch (e) { /* ignore */ }
+
+                    // If the captured stream ends (user stops sharing), clear nodes.
+                    if (stream.getAudioTracks) {
+                        stream.getAudioTracks().forEach(t => t.addEventListener('ended', () => {
+                            analyser = null;
+                        }));
+                    }
+                } catch (err) {
+                    console.warn('Tab capture failed:', err);
+                }
+            }
+
+            // Try to initialize immediately, and also set up a one-time
+            // user-gesture listener so a click/keydown will trigger capture.
+            let gestureListenerAdded = false;
+            function ensureInitOnGesture() {
+                if (actx || gestureListenerAdded) return;
+                // Try now (may prompt)
+                // initTabCapture();
+                const onGesture = () => {
+                    if (!actx) initTabCapture();
+                    window.removeEventListener('click', onGesture, true);
+                    window.removeEventListener('keydown', onGesture, true);
+                };
+                window.addEventListener('click', onGesture, true);
+                window.addEventListener('keydown', onGesture, true);
+                gestureListenerAdded = true;
+            }
 
             // Called every frame while playing.
             // nowMs       = performance.now()
             // trackPosMs  = interpolated Spotify position (ms)
             function read(nowMs, trackPosMs) {
-                if (!analyser) return;
+                if (!analyser) {
+                    ensureInitOnGesture();
+                    return;
+                }
                 analyser.getByteFrequencyData(freqData);
                 analyser.getFloatTimeDomainData(timeData);
 
@@ -925,7 +964,6 @@
                     const iv = lastBeatWallMs > 0 ? nowMs - lastBeatWallMs : 0;
                     lastBeatWallMs = nowMs;
 
-                    // Update BPM from recent intervals.
                     if (iv > 200 && iv < 2000) {
                         beatIntervals.push(iv);
                         if (beatIntervals.length > 12) beatIntervals.shift();
@@ -933,22 +971,29 @@
                         state.bpm = clamp(60000 / avg2, 40, 220);
                     }
 
-                    // Record the track position of this beat as the new phase anchor.
-                    // The render-loop scheduler uses this to compute future beat positions.
                     state.lastBeatTrackMs = trackPosMs;
-                    // Align nextBeatTrackMs to this beat (keeps phase locked).
                     state.nextBeatTrackMs = trackPosMs;
                 }
             }
 
             function tryResume() {
-                if (actx && actx.state === "suspended") actx.resume().catch(() => { });
+                if (actx && actx.state === 'suspended') actx.resume().catch(() => { });
             }
             function isRunning() {
-                return actx !== null && actx.state === "running";
+                return actx !== null && actx.state === 'running';
             }
 
-            return { read, state, tryResume, isRunning };
+            // Kick off an initial attempt to obtain tab audio when the page loads.
+            // This will usually require a user gesture; the gesture listeners will
+            // retry when the user interacts.
+            ensureInitOnGesture();
+
+            // Expose explicit starter so UI can trigger tab-capture on demand.
+            function startCapture() {
+                return initTabCapture();
+            }
+
+            return { read, state, tryResume, isRunning, startCapture };
         }
 
         // =========================================================================
@@ -1045,11 +1090,11 @@
                     return;
                 }
 
-                _player.activateElement().then(() => {
-                    console.log("Goontunes: device activated");
-                }).catch(e => {
-                    console.warn("Goontunes: device activation failed", e);
-                });
+                // _player.activateElement().then(() => {
+                //     console.log("Goontunes: device activated");
+                // }).catch(e => {
+                //     console.warn("Goontunes: device activation failed", e);
+                // });
 
                 console.log("Goontunes: transferring playback to SDK device");
                 try {
@@ -1097,7 +1142,48 @@
             // Audio analyser MUST be created before SDK script is injected so the
             // AudioContext monkey-patch is in place when the SDK creates its context.
             const audio = createAudioAnalyser();
-            audio.tryResume();
+            // Add a visible button to let the user explicitly start tab audio capture.
+            (function addCaptureButton() {
+                // Append to body to avoid `#hud { pointer-events: none }` blocking clicks
+                const hud = document.body;
+                const btn = document.createElement('button');
+                btn.id = 'start-capture-btn';
+                btn.textContent = 'Start Tab Audio';
+                btn.title = 'Click to allow capturing this tab\'s audio for the visualiser';
+                Object.assign(btn.style, {
+                    position: 'fixed',
+                    right: '16px',
+                    bottom: '16px',
+                    padding: '8px 12px',
+                    background: 'rgba(0,0,0,0.6)',
+                    color: '#fff',
+                    border: '1px solid rgba(255,255,255,0.08)',
+                    borderRadius: '6px',
+                    zIndex: 2000,
+                    cursor: 'pointer'
+                });
+
+                btn.addEventListener('click', async () => {
+                    btn.disabled = true;
+                    btn.textContent = 'Starting...';
+                    try {
+                        if (audio && typeof audio.startCapture === 'function') {
+                            await audio.startCapture();
+                            btn.textContent = 'Capture active';
+                            setTimeout(() => btn.remove(), 2000);
+                        } else {
+                            btn.textContent = 'Unavailable';
+                        }
+                    } catch (err) {
+                        console.warn('Start capture failed:', err);
+                        btn.disabled = false;
+                        btn.textContent = 'Start Tab Audio';
+                    }
+                });
+
+                hud.appendChild(btn);
+            })();
+            //audio.tryResume();
 
             const { renderer, scene, camera, updateGlow } = setupRenderer();
             buildSceneDressing(scene);
@@ -1116,10 +1202,10 @@
             let lastTrackId = null;
 
             function resetBeatRoadAndCar(trackPosMs) {
-                carDist = (trackPosMs / 1000) * CONFIG.CAR_SPEED + BEAT_LOOKAHEAD * 0.15;
+                //carDist = (trackPosMs / 1000) * CONFIG.CAR_SPEED + BEAT_LOOKAHEAD * 0.15;
                 beats.clearAll();
-                track.reset(carDist);
-                audio.state.nextBeatTrackMs = trackPosMs;
+                //track.reset(carDist);
+                audio.state.nextBeatTrackMs = trackPosMs; // TODO ?
                 audio.state.lastBeatTrackMs = trackPosMs;
             }
 
@@ -1245,7 +1331,7 @@
             function _gestureResume() {
                 audio.tryResume();
                 if (audio.isRunning()) {
-                    player.transferAndPlay();
+                    // player.transferAndPlay();
                     document.removeEventListener("click", _gestureResume);
                     document.removeEventListener("keydown", _gestureResume);
                     document.removeEventListener("touchend", _gestureResume);
