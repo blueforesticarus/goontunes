@@ -10,7 +10,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        python = pkgs.python3.withPackages (ps: [ ps.requests ps.spotipy ps.pygame ps.websockets ]);
+        python = pkgs.python3.withPackages (ps: with ps; [ requests spotipy pygame websockets flask flask-socketio eventlet mutagen madmom ]);
       in
       {
         # `nix run` runs the library checker

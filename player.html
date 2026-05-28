@@ -20,56 +20,6 @@
             font-family: monospace
         }
 
-        #ui {
-            position: fixed;
-            inset: 0;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            background: #04030a;
-            color: #cce;
-            z-index: 20
-        }
-
-        #ui h1 {
-            font-size: 1.5em;
-            color: #0cf;
-            letter-spacing: 4px;
-            margin-bottom: 20px
-        }
-
-        #ui p {
-            color: #556;
-            font-size: .85em;
-            margin: 5px 0;
-            max-width: 380px;
-            text-align: center
-        }
-
-        #login-btn {
-            margin-top: 22px;
-            padding: 11px 30px;
-            background: #1db954;
-            color: #000;
-            border: none;
-            border-radius: 22px;
-            font-size: 1em;
-            font-weight: bold;
-            cursor: pointer
-        }
-
-        #login-btn:hover {
-            background: #1ed760
-        }
-
-        #st {
-            margin-top: 14px;
-            font-size: .78em;
-            color: #445;
-            min-height: 1.2em
-        }
-
         #hud {
             position: fixed;
             top: 16px;
@@ -134,26 +84,58 @@
             display: none;
             letter-spacing: 1px;
         }
+
+        /* Centered play overlay shown when WebAudio is suspended */
+        #play-overlay {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            pointer-events: auto;
+            background: rgba(0, 0, 0, 0.45);
+        }
+
+        #play-overlay button {
+            background: rgba(255, 255, 255, 0.06);
+            color: #0cf;
+            border: 1px solid rgba(0, 204, 255, 0.25);
+            padding: 18px 28px;
+            font-size: 1.6rem;
+            border-radius: 12px;
+            cursor: pointer;
+            backdrop-filter: blur(4px);
+        }
     </style>
 </head>
 
 <body>
-    <div id="ui">
-        <h1>&#9834; GOONTUNES</h1>
-        <p>3D Rainbow Road visualizer &mdash; Spotify Web Playback SDK</p>
-        <p>Requires Spotify Premium.</p>
-        <button id="login-btn">Connect Spotify</button>
-        <p id="st"></p>
-    </div>
     <div id="hud">
         <div class="track" id="h-track">&#8212;</div>
         <div class="artist" id="h-artist"></div>
         <div class="stats" id="h-stats"></div>
+        <div style="margin-top:10px; display:flex; gap:8px;">
+            <button id="prev-btn" style="pointer-events:auto">⏮️</button>
+            <button id="play-btn" style="pointer-events:auto">⏯️</button>
+            <button id="next-btn" style="pointer-events:auto">⏭️</button>
+        </div>
     </div>
     <div id="prog">
         <div id="prog-fill"></div>
     </div>
     <div id="mute-banner">&#128263; tap anywhere to unmute</div>
+    <!-- Hidden audio element: plays /stream from server, used for analysis and playback -->
+    <audio id="audio" src="/stream" preload="auto" crossorigin="anonymous" style="display:none"></audio>
+
+    <!-- Essentia.js (optional): used to prototype BPM estimation if available -->
+    <script src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia.js-core.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/essentia.js@0.1.3/dist/essentia-wasm.web.min.js"></script>
+
+    <!-- Play overlay: visible when user must enable audio / resume AudioContext -->
+    <div id="play-overlay">
+        <button id="play-overlay-btn">▶️ Tap to enable audio</button>
+    </div>
 
     <script type="importmap">
 {"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js"}}
@@ -236,84 +218,17 @@
             (_, i) => (i - (CONFIG.TRACK_COUNT - 1) / 2) * CONFIG.TRACK_SPACE);
 
         // =========================================================================
-        // §3  AUTH  -- Spotify PKCE token management
-        //     Future: add Discord OAuth alongside Spotify (#6).
+        // §3  AUTH  -- Spotify PKCE removed
+        // We provide a tiny stub so existing UI (Connect button) remains wired
+        // but does nothing in the server-backed playback flow.
         // =========================================================================
 
         const SpotifyAuth = (() => {
-            const CLIENT_ID = "1d68b91899e746fcab809f446472e27f";
-            const REDIRECT = location.origin + location.pathname;
-            const SCOPES = "streaming user-read-email user-read-private " +
-                "user-read-currently-playing user-read-playback-state " +
-                "user-modify-playback-state";
-
-            const b64url = b => btoa(String.fromCharCode(...new Uint8Array(b)))
-                .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-            const randStr = n => {
-                const a = new Uint8Array(n); crypto.getRandomValues(a);
-                return b64url(a.buffer).slice(0, n);
-            };
-
-            async function startPKCE() {
-                const v = randStr(64);
-                const ch = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v)));
-                sessionStorage.setItem("pv", v);
-                location.href = "https://accounts.spotify.com/authorize?" + new URLSearchParams({
-                    client_id: CLIENT_ID, response_type: "code", redirect_uri: REDIRECT,
-                    scope: SCOPES, code_challenge_method: "S256", code_challenge: ch,
-                });
-            }
-
-            async function exchangeCode(code) {
-                const r = await fetch("https://accounts.spotify.com/api/token", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                    body: new URLSearchParams({
-                        grant_type: "authorization_code", code,
-                        redirect_uri: REDIRECT, client_id: CLIENT_ID,
-                        code_verifier: sessionStorage.getItem("pv"),
-                    }),
-                });
-                if (!r.ok) throw new Error(await r.text());
-                return r.json();
-            }
-
-            async function doRefresh() {
-                const r = await fetch("https://accounts.spotify.com/api/token", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                    body: new URLSearchParams({
-                        grant_type: "refresh_token",
-                        refresh_token: localStorage.getItem("sp_r"),
-                        client_id: CLIENT_ID,
-                    }),
-                });
-                if (!r.ok) throw new Error(await r.text());
-                return r.json();
-            }
-
-            function saveTokens(d) {
-                localStorage.setItem("sp_a", d.access_token);
-                if (d.refresh_token) localStorage.setItem("sp_r", d.refresh_token);
-                localStorage.setItem("sp_e", Date.now() + (d.expires_in - 60) * 1000);
-            }
-
-            async function getToken() {
-                if (localStorage.getItem("sp_a") && Date.now() < +localStorage.getItem("sp_e"))
-                    return localStorage.getItem("sp_a");
-                if (localStorage.getItem("sp_r")) {
-                    const d = await doRefresh(); saveTokens(d); return d.access_token;
-                }
-                throw new Error("no token");
-            }
-
-            // Only remove Spotify keys -- never wipe unrelated localStorage entries.
-            function clearTokens() {
-                localStorage.removeItem("sp_a");
-                localStorage.removeItem("sp_r");
-                localStorage.removeItem("sp_e");
-            }
-
+            function startPKCE() { console.log('Spotify PKCE disabled; using server stream'); }
+            async function exchangeCode() { throw new Error('not implemented'); }
+            function saveTokens() { }
+            async function getToken() { throw new Error('not available'); }
+            function clearTokens() { }
             return { startPKCE, exchangeCode, saveTokens, getToken, clearTokens };
         })();
 
@@ -844,156 +759,189 @@
         }
 
         // =========================================================================
-        // §9  AUDIO ANALYSER
-        //     Monkey-patches AudioContext BEFORE the SDK creates its context.
-        //     Future: expose freqData for spectrum lighting (#8).
-        //     Future: replace with server-streamed source (#7).
+        // §9  AUDIO ANALYSER (reworked)
+        // Connects the hidden <audio id="audio"> element to WebAudio's AnalyserNode
+        // Exposes the same minimal API used by the visualiser: { read(nowMs, trackPosMs), state, tryResume, isRunning }
         // =========================================================================
 
         function createAudioAnalyser() {
-
-            // This implementation uses tab capture (getDisplayMedia) to obtain
-            // an audio MediaStream from the current tab, then connects it to
-            // an analyser node. Monkey-patching the SDK's AudioContext was
-            // unreliable, so we request a user gesture to start capture.
-
-            const HIST = 48;
-            const freqData = new Uint8Array(1024);
-            const timeData = new Float32Array(2048);
-            const bassHist = new Float32Array(HIST);
-            let histIdx = 0;
-            let lastBeatWallMs = 0;   // wall-clock time of last detected beat
-            let beatIntervals = [];  // recent inter-beat intervals (ms)
-
-            const state = {
-                bpm: 120,
-                energy: 0.3,
-                lastBeatTrackMs: -1,
-                nextBeatTrackMs: 0,
-            };
+            const FFT = 2048;
+            const freqData = new Uint8Array(FFT / 2);
+            const timeData = new Float32Array(FFT);
+            const state = { bpm: 120, energy: 0.3, lastBeatTrackMs: -1, nextBeatTrackMs: 0, phase: 0 };
 
             let actx = null;
             let analyser = null;
+            let source = null;
 
-            async function initTabCapture() {
+            // Rolling buffer for multi-second analysis
+            const ANALYSE_SECONDS = 8; // how many seconds to keep for BPM estimation
+            let sampleRate = 44100;
+            let ring = null;
+            let ringPos = 0;
+            let ringFilled = 0;
+            let lastEstimate = 0;
+            let lastBpmEstimate = null;
+            const ESTIMATE_INTERVAL_MS = 800; // target cadence for new estimates
+            let lastFrame = null;
+            let lastSampleIndex = null;
+
+            // Create / lazy-init WebAudio and analyser
+            function ensure() {
+                if (analyser) return;
                 try {
-                    // if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-                    //     console.warn("Tab capture not available in this browser");
-                    //     return;
-                    // }
-
-                    console.log("Requesting tab audio capture...");
-                    const _OrigAC = window.AudioContext || window.webkitAudioContext;
-                    actx = new _OrigAC();
-
-                    // Request display/media capture from the user. This must be
-                    // triggered by a user gesture in most browsers. It may capture
-                    // the tab audio when the user selects "Current tab".
-                    const stream = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: false, preferCurrentTab: true });
-                    const src = actx.createMediaStreamSource(stream);
-
+                    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                    actx = new AudioCtx();
+                    sampleRate = actx.sampleRate || 44100;
                     analyser = actx.createAnalyser();
-                    analyser.fftSize = 2048;
+                    analyser.fftSize = FFT;
                     analyser.smoothingTimeConstant = 0.72;
-
-                    src.connect(analyser);
-                    // Connect analyser to destination so audio continues to play.
-                    try { analyser.connect(actx.destination); } catch (e) { /* ignore */ }
-
-                    // If the captured stream ends (user stops sharing), clear nodes.
-                    if (stream.getAudioTracks) {
-                        stream.getAudioTracks().forEach(t => t.addEventListener('ended', () => {
-                            analyser = null;
-                        }));
+                    const audioEl = document.getElementById('audio');
+                    if (audioEl) {
+                        try {
+                            source = actx.createMediaElementSource(audioEl);
+                            source.connect(analyser);
+                            analyser.connect(actx.destination);
+                        } catch (e) {
+                            console.warn('Failed to connect audio element to analyser', e);
+                        }
                     }
-                } catch (err) {
-                    console.warn('Tab capture failed:', err);
+
+                    // allocate ring buffer after we know the sampleRate
+                    const ringSize = Math.max(16384, Math.floor(ANALYSE_SECONDS * sampleRate));
+                    ring = new Float32Array(ringSize);
+                    ringPos = 0; ringFilled = 0;
+                } catch (e) {
+                    console.warn('WebAudio init failed', e);
                 }
             }
 
-            // Try to initialize immediately, and also set up a one-time
-            // user-gesture listener so a click/keydown will trigger capture.
-            let gestureListenerAdded = false;
-            function ensureInitOnGesture() {
-                if (actx || gestureListenerAdded) return;
-                // Try now (may prompt)
-                // initTabCapture();
-                const onGesture = () => {
-                    if (!actx) initTabCapture();
-                    window.removeEventListener('click', onGesture, true);
-                    window.removeEventListener('keydown', onGesture, true);
-                };
-                window.addEventListener('click', onGesture, true);
-                window.addEventListener('keydown', onGesture, true);
-                gestureListenerAdded = true;
+            // Estimate tempo from a buffer using Essentia only (no JS fallback)
+            function estimateBpmFromBuffer(buf, sr) {
+                try {
+                    const E = window.Essentia || window.essentia;
+                    if (!E) return null;
+
+                    // Obtain Essentia instance. Some builds expose a constructor, others expose a ready object or a Promise.
+                    let maybeEss = null;
+                    try {
+                        if (typeof window.Essentia === 'function') {
+                            // constructor-style
+                            maybeEss = new window.Essentia();
+                        } else {
+                            maybeEss = window.essentia || window.Essentia;
+                        }
+                    } catch (e) {
+                        maybeEss = window.essentia || window.Essentia;
+                    }
+
+                    // If Essentia is provided as a Promise (WASM init), handle async completion.
+                    if (maybeEss && typeof maybeEss.then === 'function') {
+                        maybeEss.then(inst => {
+                            try {
+                                if (typeof inst.RhythmExtractor2013 === 'function') {
+                                    const res = inst.RhythmExtractor2013(buf, sr);
+                                    if (res) {
+                                        const bpm = res.bpm || res.tempo || (Array.isArray(res) && res[0]);
+                                        if (bpm) { lastBpmEstimate = bpm; lastEstimate = Date.now(); }
+                                    }
+                                }
+                            } catch (e) { /* ignore */ }
+                        }).catch(() => { /* ignore */ });
+                        return null;
+                    }
+
+                    const ess = maybeEss;
+                    if (!ess) return null;
+
+                    // Call rhythm extractor (signature may vary across builds)
+                    if (typeof ess.RhythmExtractor2013 === 'function') {
+                        const res = ess.RhythmExtractor2013(buf, sr);
+                        if (!res) return null;
+                        const bpm = res.bpm || res.tempo || (Array.isArray(res) && res[0]);
+                        return bpm || null;
+                    }
+
+                    return null;
+                } catch (e) {
+                    return null;
+                }
             }
 
-            // Called every frame while playing.
-            // nowMs       = performance.now()
-            // trackPosMs  = interpolated Spotify position (ms)
             function read(nowMs, trackPosMs) {
-                if (!analyser) {
-                    ensureInitOnGesture();
-                    return;
-                }
+                if (!analyser) { ensure(); if (!analyser) return; }
                 analyser.getByteFrequencyData(freqData);
                 analyser.getFloatTimeDomainData(timeData);
 
-                let bass = 0;
-                for (let i = 1; i <= 14; i++) bass += freqData[i];
-                bass /= 14 * 255;
-
+                // simple energy estimate (rms)
                 let rms = 0;
-                for (const v of timeData) rms += v * v;
+                for (let i = 0; i < timeData.length; i++) rms += timeData[i] * timeData[i];
                 rms = Math.sqrt(rms / timeData.length);
+                state.energy += (rms * 2.0 - state.energy) * 0.12;
 
-                bassHist[histIdx] = bass;
-                histIdx = (histIdx + 1) % HIST;
+                // Append only samples that are newer than the last appended sample,
+                // using the analyser's sample index derived from `actx.currentTime`.
+                if (ring && actx) {
+                    const frameLen = timeData.length;
+                    const endSample = Math.floor(actx.currentTime * sampleRate);
+                    const startSample = endSample - frameLen + 1;
+                    const firstNew = (typeof lastSampleIndex === 'number') ? Math.max(startSample, lastSampleIndex + 1) : startSample;
+                    let offset = firstNew - startSample;
+                    if (offset < 0) offset = 0;
+                    if (offset < frameLen) {
+                        for (let i = offset; i < frameLen; i++) {
+                            ring[ringPos] = timeData[i];
+                            ringPos = (ringPos + 1) % ring.length;
+                            if (ringFilled < ring.length) ringFilled++;
+                        }
+                    }
+                    lastSampleIndex = endSample;
+                }
 
-                let avg = 0;
-                for (const v of bassHist) avg += v;
-                avg /= HIST;
-
-                state.energy += (rms * 2.2 - state.energy) * 0.12;
-
-                const isBeat = bass > avg * 1.45 + 0.012
-                    && bass > 0.016
-                    && nowMs - lastBeatWallMs > 190;
-
-                if (isBeat) {
-                    const iv = lastBeatWallMs > 0 ? nowMs - lastBeatWallMs : 0;
-                    lastBeatWallMs = nowMs;
-
-                    if (iv > 200 && iv < 2000) {
-                        beatIntervals.push(iv);
-                        if (beatIntervals.length > 12) beatIntervals.shift();
-                        const avg2 = beatIntervals.reduce((a, b) => a + b, 0) / beatIntervals.length;
-                        state.bpm = clamp(60000 / avg2, 40, 220);
+                // Periodically trigger BPM estimation (every ~3s)
+                const now = Date.now();
+                if (ring && ringFilled >= Math.floor(sampleRate * 3) && now - lastEstimate > 2500) {
+                    // build contiguous buffer copy
+                    const buf = new Float32Array(ringFilled);
+                    // If buffer hasn't wrapped yet, copy directly.
+                    if (ringFilled < ring.length) {
+                        buf.set(ring.subarray(0, ringFilled));
+                    } else {
+                        // Full buffer: may be rotated. When ringPos == 0 it's already contiguous.
+                        if (ringPos === 0) {
+                            buf.set(ring);
+                        } else {
+                            const tail = ring.subarray(ringPos, ring.length);
+                            const head = ring.subarray(0, ringPos);
+                            buf.set(tail, 0);
+                            buf.set(head, tail.length);
+                        }
+                    }
+                    const est = estimateBpmFromBuffer(buf, sampleRate);
+                    if (est && Number.isFinite(est)) {
+                        lastBpmEstimate = est;
+                        lastEstimate = now;
                     }
 
-                    state.lastBeatTrackMs = trackPosMs;
-                    state.nextBeatTrackMs = trackPosMs;
+                    // Smoothly blend displayed BPM toward latest estimate for continuous updates
+                    if (lastBpmEstimate && Number.isFinite(lastBpmEstimate)) {
+                        const alpha = 0.06; // smoothing factor per read() call
+                        state.bpm += (lastBpmEstimate - state.bpm) * alpha;
+                    }
                 }
+
+                // beat detection (drive spawn rate)
             }
 
-            function tryResume() {
-                if (actx && actx.state === 'suspended') actx.resume().catch(() => { });
-            }
-            function isRunning() {
-                return actx !== null && actx.state === 'running';
-            }
+            function tryResume() { if (actx && actx.state === 'suspended') actx.resume().catch(() => { }); }
+            function isRunning() { return actx !== null && actx.state === 'running'; }
 
-            // Kick off an initial attempt to obtain tab audio when the page loads.
-            // This will usually require a user gesture; the gesture listeners will
-            // retry when the user interacts.
-            ensureInitOnGesture();
-
-            // Expose explicit starter so UI can trigger tab-capture on demand.
-            function startCapture() {
-                return initTabCapture();
-            }
-
-            return { read, state, tryResume, isRunning, startCapture };
+            // TODO unify with button function
+            // expose a resume hook so a user gesture can resume the analyser
+            window.__resumeAnalyser = tryResume;
+            window.__analyserIsRunning = isRunning;
+            window.__audioAnalyserState = state;
+            return { read, state, tryResume, isRunning };
         }
 
         // =========================================================================
@@ -1027,107 +975,75 @@
         //      Future: server-controlled mode (#7), Discord source (#6).
         // =========================================================================
 
+        // setupSpotifyPlayer -> connects to server Socket.IO and forwards server state
+        // The server emits messages with { track_idx, track, paused, position (s), duration (s) }
+        // We convert to the shape expected by the visualiser's onState callback.
         function setupSpotifyPlayer(onState) {
-            // Returned so boot() can call player.getCurrentState() directly.
-            let _player = null;
+            // ensure socket.io client script is present
+            if (typeof io === 'undefined') {
+                const s = document.createElement('script');
+                // Load Socket.IO client from CDN to avoid server-served client 400 errors
+                s.src = 'https://cdn.jsdelivr.net/npm/socket.io-client@4/dist/socket.io.min.js';
+                s.onload = () => connectSocket();
+                document.head.appendChild(s);
+            } else connectSocket();
 
-            window.onSpotifyWebPlaybackSDKReady = function () {
-                _player = new Spotify.Player({
-                    name: "Goontunes",
-                    getOAuthToken: async cb => {
-                        try { cb(await SpotifyAuth.getToken()); }
-                        catch (e) {
-                            console.error("Goontunes: token error", e);
-                            SpotifyAuth.clearTokens();
-                        }
-                    },
-                    volume: 1.0,
-                });
-
-                // ── All SDK events ──────────────────────────────────────────────
-                _player.addListener("ready", ({ device_id }) => {
-                    console.log("Goontunes: SDK ready, device", device_id);
-                    _player.device_id = device_id;
-
-                    transferAndPlay();
-                });
-
-                _player.addListener("not_ready", ({ device_id }) => {
-                    console.warn("Goontunes: device went offline", device_id);
-                });
-
-                _player.addListener("player_state_changed", st => {
-                    console.log("Goontunes: player state changed", st);
-                    if (st) onState(st);
-                });
-
-                _player.addListener("initialization_error", ({ message }) => {
-                    console.error("Goontunes: Spotify init error:", message);
-                });
-
-                _player.addListener("authentication_error", ({ message }) => {
-                    console.error("Goontunes: Spotify auth error:", message);
-                    SpotifyAuth.clearTokens();
-                });
-
-                _player.addListener("account_error", ({ message }) => {
-                    console.error("Goontunes: Spotify account error (Premium required?):", message);
-                });
-
-                _player.addListener("playback_error", ({ message }) => {
-                    console.error("Goontunes: Spotify playback error:", message);
-                });
-
-                _player.connect();
-            };
-
-            // Transfer active playback to our SDK device and ensure it is playing.
-            // play:true means "start / resume on this device" -- this intentionally
-            // resumes a paused track so the visualiser always has audio.
-            async function transferAndPlay() {
-                if (!_player || !_player.device_id) {
-                    console.warn("Goontunes: cannot transfer, player not ready");
-                    return;
-                }
-
-                // _player.activateElement().then(() => {
-                //     console.log("Goontunes: device activated");
-                // }).catch(e => {
-                //     console.warn("Goontunes: device activation failed", e);
-                // });
-
-                console.log("Goontunes: transferring playback to SDK device");
+            let sock = null;
+            function connectSocket() {
                 try {
-                    const tok = await SpotifyAuth.getToken();
-                    const r = await fetch("https://api.spotify.com/v1/me/player", {
-                        method: "PUT",
-                        headers: { Authorization: "Bearer " + tok, "Content-Type": "application/json" },
-                        body: JSON.stringify({ device_ids: [_player.device_id], play: true }),
+                    sock = io();
+                    const audioEl = document.getElementById('audio');
+                    let _sockTrack = null;
+                    sock.on('state', srv => {
+                        // control HTML audio element (streamed by server)
+                        try {
+                            // reload stream when server signals a track change by track name
+                            if (audioEl && srv.track && srv.track !== _sockTrack) {
+                                _sockTrack = srv.track;
+                                // add cache-buster so browser requests fresh headers
+                                audioEl.src = '/stream?ts=' + Date.now();
+                                audioEl.load();
+                            }
+                            if (audioEl) {
+                                // seek if drift too large
+                                const desired = srv.position || 0;
+                                const drift = Math.abs((audioEl.currentTime || 0) - desired);
+                                if (drift > 0.6 && audioEl.readyState >= 2) {
+                                    audioEl.currentTime = desired;
+                                }
+                                if (srv.paused) {
+                                    if (!audioEl.paused) audioEl.pause();
+                                } else {
+                                    if (audioEl.paused) audioEl.play().catch(() => { });
+                                }
+                            }
+                        } catch (e) { console.warn('audio sync error', e); }
+
+                        // convert server state to spotify-like state for visualiser
+                        const st = {
+                            position: Math.floor((srv.position || 0) * 1000),
+                            paused: !!srv.paused,
+                            duration: Math.floor((srv.duration || 0) * 1000),
+                            track_window: { current_track: { name: srv.track || '', artists: [{ name: '' }], id: srv.track } }
+                        };
+                        onState(st);
                     });
-                    // 204 = success immediately; 202 = accepted (async OK)
-                    if (!r.ok && r.status !== 202 && r.status !== 204) {
-                        const body = await r.text().catch(() => "");
-                        console.warn("Goontunes: transfer failed", r.status, body);
-                    }
-                    // SDK fires player_state_changed once transfer completes.
-                    // If nothing is queued on Spotify, no event fires -- that is fine,
-                    // the user just needs to start a track from the Spotify app.
-                } catch (e) {
-                    console.warn("Goontunes: transfer error", e);
-                }
-            };
 
-            console.log("Goontunes: injecting Spotify SDK script");
+                    // wire HUD buttons to control endpoints
+                    const playBtn = document.getElementById('play-btn');
+                    const nextBtn = document.getElementById('next-btn');
+                    const prevBtn = document.getElementById('prev-btn');
+                    if (playBtn) playBtn.addEventListener('click', () => {
+                        // toggle via server
+                        fetch('/' + ((audioEl && audioEl.paused) ? 'play' : 'pause'), { method: 'POST' }).catch(() => { });
+                    });
+                    if (nextBtn) nextBtn.addEventListener('click', () => fetch('/next', { method: 'POST' }).catch(() => { }));
+                    if (prevBtn) prevBtn.addEventListener('click', () => fetch('/prev', { method: 'POST' }).catch(() => { }));
 
-            const sdkScript = document.createElement("script");
-            sdkScript.src = "https://sdk.scdn.co/spotify-player.js";
-            document.head.appendChild(sdkScript);
-
-            function get_player() {
-                if (_player) return _player;
-                else console.warn("Goontunes: Spotify player not ready yet");
+                } catch (e) { console.warn('Socket.IO connect failed', e); }
             }
-            return { get_player, transferAndPlay };
+
+            return { get_player: () => null, transferAndPlay: () => { } };
         }
 
         // =========================================================================
@@ -1136,54 +1052,52 @@
         // =========================================================================
 
         function boot() {
-            document.getElementById("ui").style.display = "none";
             document.getElementById("hud").style.display = "block";
 
             // Audio analyser MUST be created before SDK script is injected so the
             // AudioContext monkey-patch is in place when the SDK creates its context.
             const audio = createAudioAnalyser();
-            // Add a visible button to let the user explicitly start tab audio capture.
-            (function addCaptureButton() {
-                // Append to body to avoid `#hud { pointer-events: none }` blocking clicks
-                const hud = document.body;
-                const btn = document.createElement('button');
-                btn.id = 'start-capture-btn';
-                btn.textContent = 'Start Tab Audio';
-                btn.title = 'Click to allow capturing this tab\'s audio for the visualiser';
-                Object.assign(btn.style, {
-                    position: 'fixed',
-                    right: '16px',
-                    bottom: '16px',
-                    padding: '8px 12px',
-                    background: 'rgba(0,0,0,0.6)',
-                    color: '#fff',
-                    border: '1px solid rgba(255,255,255,0.08)',
-                    borderRadius: '6px',
-                    zIndex: 2000,
-                    cursor: 'pointer'
-                });
-
-                btn.addEventListener('click', async () => {
-                    btn.disabled = true;
-                    btn.textContent = 'Starting...';
-                    try {
-                        if (audio && typeof audio.startCapture === 'function') {
-                            await audio.startCapture();
-                            btn.textContent = 'Capture active';
-                            setTimeout(() => btn.remove(), 2000);
-                        } else {
-                            btn.textContent = 'Unavailable';
-                        }
-                    } catch (err) {
-                        console.warn('Start capture failed:', err);
-                        btn.disabled = false;
-                        btn.textContent = 'Start Tab Audio';
-                    }
-                });
-
-                hud.appendChild(btn);
-            })();
             //audio.tryResume();
+
+            // Play-overlay: show a centered button when the analyser / AudioContext
+            // is suspended and a user gesture is required to start audio.
+            (function setupPlayOverlay() {
+                const overlay = document.getElementById('play-overlay');
+                const btn = document.getElementById('play-overlay-btn');
+                const audioEl = document.getElementById('audio');
+                if (!overlay || !btn) return;
+
+                function show() { overlay.style.display = 'flex'; }
+                function hide() { overlay.style.display = 'none'; }
+
+                // If analyser reports running, hide immediately.
+                try {
+                    if (window.__analyserIsRunning && window.__analyserIsRunning()) {
+                        hide();
+                    } else show();
+                } catch (e) { show(); }
+
+                btn.addEventListener('click', () => {
+                    try {
+                        if (audio && typeof audio.tryResume === 'function') audio.tryResume();
+                        if (window.__resumeAnalyser) window.__resumeAnalyser();
+                    } catch (e) { /* ignore */ }
+                    // Attempt to start HTMLAudio playback (server stream).
+                    if (audioEl) {
+                        audioEl.play().catch(() => { /* autoplay may be blocked but gesture was given */ });
+                    }
+
+                    // Poll briefly for context becoming running, then hide overlay.
+                    const t = setInterval(() => {
+                        if (window.__analyserIsRunning && window.__analyserIsRunning()) {
+                            hide(); clearInterval(t);
+                        }
+                    }, 200);
+
+                    // Fallback hide in 2s to avoid sticky overlay in odd cases
+                    setTimeout(() => { hide(); clearInterval(t); }, 2000);
+                });
+            })();
 
             const { renderer, scene, camera, updateGlow } = setupRenderer();
             buildSceneDressing(scene);
@@ -1346,24 +1260,8 @@
         // §0  ENTRY POINT
         // =========================================================================
 
-        const stEl = document.getElementById("st");
-        document.getElementById("login-btn").onclick = SpotifyAuth.startPKCE;
 
-        (async () => {
-            const params = new URLSearchParams(location.search);
-            if (params.has("code")) {
-                history.replaceState({}, "", location.pathname);
-                stEl.textContent = "Exchanging token...";
-                try { SpotifyAuth.saveTokens(await SpotifyAuth.exchangeCode(params.get("code"))); }
-                catch (e) { stEl.textContent = "Auth error: " + e.message; return; }
-            }
-            try { await SpotifyAuth.getToken(); }
-            catch {
-                stEl.textContent = "Click Connect to begin.";
-                return
-            }
-            boot();
-        })();
+        boot();
 
     </script>
 </body>
